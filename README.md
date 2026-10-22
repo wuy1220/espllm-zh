@@ -145,4 +145,4 @@ python per_concept.py --ckpt model/model_stance26.pt
 二次分发请自行确认上游要求。
 
 本项目新增的部分 —— 中文词表与人设词典、规则层、语料工厂、训练配方、全部文档 ——
-以 MIT 发布，见 [LICENSE](LICENSE)。
+以 MIT 发布，见 [LICENSE](LICENSE)；逐项归属与同人声明见 [NOTICE.md](NOTICE.md)。

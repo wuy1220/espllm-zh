@@ -1,16 +1,6 @@
 MIT License
 
-Copyright (c) 2026 wuy1220 — 中文人设分支新增部分
-
-适用范围：本许可证覆盖本仓库中由本项目新增的内容，包括中文词表（persona/vocab_zh.json）、
-人设词典与语料工厂（persona/stance_lexicon.py、gen_*_corpus.py）、意图规则层
-（intent_rules.py、gen_rules_cpp.py）、训练与导出脚本、以及 docs/ 下的文档。
-
-它不改变上游作者对其原始推理引擎代码（src/inference.hpp、main.cpp 原有结构、
-platformio.ini、权重打包格式）的权利。上游仓库 https://github.com/ahmedbarakat207/espllm
-未声明开源许可证，复用那部分请自行确认上游要求。
-
----
+Copyright (c) 2026 wuy1220
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
