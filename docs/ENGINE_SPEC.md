@@ -1,0 +1,326 @@
+# ESP-LLM: Technical Architecture & Inference Specification
+
+ESP-LLM is a bare-metal C++ inference engine designed to execute quantized Mixture-of-Experts (MoE) autoregressive transformers on resource-constrained microcontrollers (Espressif ESP32-S3, ESP32 and ESP8266). The system implements BitNet b1.58 (1.58-bit ternary weight quantization with INT8 activations), Multi-Query Attention (MQA), Rotary Position Embeddings (RoPE), SwiGLU non-linearities, zero-heap-allocation memory arenas, NonOS/FreeRTOS watchdog execution slicing, and a deterministic arithmetic coprocessor.
+
+---
+
+## 1. System Architecture & Hardware Profiles
+
+The engine supports three target configurations tailored to microcontroller SRAM and flash constraints:
+
+| Architectural Parameter | ESP32-S3 (N16R8) | ESP32 (esp32dev) | ESP8266 (nodemcuv2 / d1_mini) |
+|---|---|---|---|
+| Core Architecture | Xtensa Dual-Core LX7 @ 240 MHz | Xtensa Dual-Core LX6 @ 240 MHz | Tensilica L106 Single-Core @ 80/160 MHz |
+| Flash / PSRAM Requirement | 16 MB flash / 8 MB octal PSRAM | 4 MB flash | 4 MB flash |
+| Embedding Dimension ($N_{embd}$) | 192 | 128 | 64 |
+| Transformer Layers ($N_{layer}$) | 12 | 8 | 4 |
+| Query Attention Heads ($N_{head}$) | 6 | 4 | 2 |
+| Key/Value Attention Heads ($N_{kv\_head}$) | 2 (Grouped-Query Attention) | 1 (Multi-Query Attention) | 1 (Multi-Query Attention) |
+| Head Dimension ($HeadDim$) | 32 ($N_{embd} / N_{head}$) | 32 ($N_{embd} / N_{head}$) | 32 ($N_{embd} / N_{head}$) |
+| MLP Hidden Dimension ($MLP_{hidden}$) | 256 | 192 | 64 |
+| Mixture-of-Experts ($N_{experts}$) | 36 experts per layer | 16 experts per layer | 32 experts per layer |
+| Expert Routing Policy | Top-1 Hard Routing ($K=1$) | Top-1 Hard Routing ($K=1$) | Top-1 Hard Routing ($K=1$) |
+| Context Window Capacity ($CTX$) | 512 tokens | 64 tokens | 28 tokens (trained on 32-token windows) |
+| Vocabulary Dimension ($Vocab$) | 2,048 BPE tokens (shared tokenizer) | 2,048 BPE tokens (shared tokenizer) | 2,048 BPE tokens (shared tokenizer) |
+| Total Parameters | ~65.4 M | ~10.0 M | ~1.8 M |
+| Quantization Scheme | Base-3 Radix 1.58-bit Ternary (5 weights/byte) / INT8 Activations, FP16 scales | Base-3 Radix 1.58-bit Ternary (5 weights/byte) / INT8 Activations, FP16 scales | Base-3 Radix 1.58-bit Ternary (5 weights/byte) / INT8 Activations, FP16 scales |
+| Weights Storage | SPI Flash (`PROGMEM`, 4-byte aligned) + PSRAM Cache | SPI Flash (`PROGMEM`, 4-byte aligned) | SPI Flash (`PROGMEM`, 4-byte aligned) |
+| Memory Management | 4096 KB Arena in octal PSRAM | 160 KB Dynamic Arena (heap) | 40 KB Static BSS Buffer (Zero Heap) |
+| Static System RAM (measured) | ~19 KB | ~22 KB | ~71.6 KB (incl. 40 KB arena, 87.5% of 80 KB) |
+| Active Inference SRAM | ~3.1 MB (PSRAM) | ~150 KB (of 160 KB heap arena) | ~38.6 KB (of 40 KB static arena) |
+| Binary Flash Consumption | ~15.6 MB (98.2% of 15.88 MB app) | ~2.7 MB (68% of 3.9 MB app) | ~0.71 MB (68.2% of 1.0 MB irom) |
+
+---
+
+## 2. Transformer Mathematical Formulation
+
+### 2.1 Rotary Position Embeddings (RoPE)
+Positional encoding is applied to Query ($Q$) and Key ($K$) vectors prior to dot-product attention. For a token at sequence index $m \in [0, CTX-1]$ and dimension pair index $i \in [0, HeadDim/2 - 1]$:
+
+$$\theta_i = 10000^{-2i / HeadDim}$$
+
+The 2D coordinate transformation is computed as:
+
+$$\begin{pmatrix} x_{2i}' \\ x_{2i+1}' \end{pmatrix} = \begin{pmatrix} \cos(m\theta_i) & -\sin(m\theta_i) \\ \sin(m\theta_i) & \cos(m\theta_i) \end{pmatrix} \begin{pmatrix} x_{2i} \\ x_{2i+1} \end{pmatrix}$$
+
+Trigonometric tables (`rope_cos`, `rope_sin`) are precomputed at compile time and stored in 32-bit aligned flash memory.
+
+### 2.2 Multi-Query Attention (MQA)
+To minimize Key-Value cache memory overhead in SRAM, a single Key-Value head ($N_{kv\_head}=1$) is projected and shared across all Query heads ($N_{head}$):
+
+$$Q = \text{Linear}(x; W_q) \in \mathbb{R}^{N_{head} \times HeadDim}$$
+$$K = \text{Linear}(x; W_k) \in \mathbb{R}^{1 \times HeadDim}$$
+$$V = \text{Linear}(x; W_v) \in \mathbb{R}^{1 \times HeadDim}$$
+
+For Query head $h \in [0, N_{head}-1]$, the attention distribution across context positions $s \in [0, pos]$ is computed with scaling and stabilized softmax:
+
+$$A_{h, s} = \frac{Q_h \cdot K_s^\top}{\sqrt{HeadDim}}$$
+$$S_{h, s} = \frac{\exp(A_{h, s} - \max_j A_{h, j})}{\sum_{j=0}^{pos} \exp(A_{h, j} - \max_k A_{h, k})}$$
+$$\text{AttnOut}_h = \sum_{s=0}^{pos} S_{h, s} V_s$$
+
+### 2.3 SwiGLU Gated Feed-Forward Networks
+Each expert layer implements a SwiGLU non-linear projection:
+
+$$\text{SiLU}(z) = z \cdot \sigma(z) = \frac{z}{1 + e^{-z}}$$
+$$\text{SwiGLU}(x) = (\text{Linear}(x; W_{\text{gate}}) \odot \text{SiLU}(\text{Linear}(x; W_{\text{gate}}))) \odot \text{Linear}(x; W_{\text{up}})$$
+$$\text{ExpertOut}(x) = \text{Linear}(\text{SwiGLU}(x); W_{\text{down}})$$
+
+### 2.4 Sparse Mixture of Experts (MoE) Top-1 Routing
+At each transformer layer $l$, a normalized linear router selects the active expert:
+
+$$e^* = \arg\max_{e \in [0, N_{experts}-1]} (x_{\text{norm}} \cdot W_{\text{router}, e}^\top)$$
+
+Only the weights corresponding to expert $e^*$ are read from flash and computed, maintaining constant execution time per token regardless of total expert count.
+
+### 2.5 Root Mean Square Normalization (RMSNorm)
+Pre-attention, pre-MLP, and final normalization use RMSNorm with learnable scaling parameter $\gamma$:
+
+$$\text{RMSNorm}(x) = \frac{x}{\sqrt{\frac{1}{N_{embd}} \sum_{i=1}^{N_{embd}} x_i^2 + \epsilon}} \odot \gamma \quad (\epsilon = 10^{-5})$$
+
+---
+
+## 3. BitNet b1.58 Quantization Engine & GEMM Kernel
+
+### 3.1 Quantization Representation
+Weights are quantized globally or per-group to ternary values `{-1, 0, 1}` using `absmean` scaling, bypassing zero-points:
+
+$$scale_{w} = \text{mean}(|W|)$$
+$$W_q = \text{clamp}\left(\text{round}\left(\frac{W}{scale_w}\right), -1, 1\right)$$
+
+During the forward pass, activations are dynamically quantized to INT8 using `absmax` scaling per token:
+
+$$scale_{x} = \frac{\max(|X|)}{127}$$
+$$X_q = \text{clamp}\left(\text{round}\left(\frac{X}{scale_x}\right), -128, 127\right)$$
+
+### 3.2 Storage Layout & 2-Bit Packing
+* Since ternary weights only require 3 states, they are efficiently packed using a 2-bit encoding scheme (mapping `-1 \rightarrow 2`, `0 \rightarrow 0`, `1 \rightarrow 1`).
+* This allows **4 weights to be packed into a single byte** (`uint8_t`), yielding a 50% storage reduction over standard INT4, halving flash footprint.
+* All weight tensors (`W_packed`) and scale vectors in flash are annotated with `__attribute__((aligned(4)))` and stored in `PROGMEM`.
+
+### 3.3 Zero-Multiplication Matrix Multiplication (`matmul_bitnet_ternary`)
+* Because weights are restricted to `{-1, 0, 1}`, matrix multiplication requires **zero mathematical multiplications**.
+* The inner GEMM loop unpacks the 2-bit weights and performs purely arithmetic integer additions and subtractions against an `int32_t` accumulator:
+  * If weight is `1`: `acc += X_q`
+  * If weight is `-1`: `acc -= X_q`
+* The final `int32_t` accumulator is scaled back to a `float` using the combined $scale_w \times scale_x$ factors.
+* This dramatically increases execution speed and lowers power consumption on microcontrollers lacking hardware multiplier arrays.
+
+---
+
+## 4. Memory Architecture & Buffer Layout
+
+### 4.1 Contiguous Memory Arena
+The inference engine avoids heap fragmentation by allocating a single static or startup arena (`MemoryArena`). All tensor activation buffers are sliced contiguously:
+
+```
++-------------------------------------------------------------+
+| MemoryArena Pool (160 KB heap on ESP32 / 40 KB BSS on ESP8266) |
++-------------------------------------------------------------+
+| Offset | Tensor Buffer | Size   | Description               |
++--------+---------------+--------+---------------------------+
+| 0x00000| g_x           | 512 B  | Token hidden state vector |
+| 0x00200| g_kbuf        | 64 KB  | Multi-layer Key cache     |
+| 0x10200| g_vbuf        | 64 KB  | Multi-layer Value cache   |
+| 0x20200| g_xnorm       | 512 B  | RMSNorm normalized vector |
+| 0x20400| g_qkv_out     | 768 B  | Fused QKV projection      |
+| 0x20700| g_attn_out    | 512 B  | Multi-head accumulator    |
+| 0x20900| g_proj_out    | 512 B  | Attention dense output    |
+| 0x20B00| g_att         | 256 B  | Attention softmax scores  |
+| 0x20C00| g_mlp_gate    | 768 B  | Active expert gate        |
+| 0x20F00| g_mlp_up      | 768 B  | Active expert up          |
+| 0x21200| g_mlp_hidden  | 768 B  | SwiGLU activation vector  |
+| 0x21500| g_mlp_out     | 512 B  | Expert down projection    |
+| 0x21700| g_logits      | 8 KB   | Output vocabulary logits  |
++-------------------------------------------------------------+
+| ESP32 footprint: 145,152 B (~141.8 KB), ~18 KB headroom     |
+| ESP8266 footprint: 39,536 B (~38.6 KB), ~1.4 KB headroom    |
++-------------------------------------------------------------+
+```
+
+### 4.2 SRAM Allocation Matrix
+
+#### ESP32 Target ($CTX=64, N_{embd}=128, N_{layer}=8$)
+| Allocation Target | Dimension / Calculation | Bytes |
+|---|---|---|
+| Key Cache (`g_kbuf`) | $8 \times 64 \times 1 \times 32 \times 4\text{ B}$ (8 layers, 64 ctx, 1 KV head, 32 dim) | 65,536 |
+| Value Cache (`g_vbuf`) | $8 \times 64 \times 1 \times 32 \times 4\text{ B}$ (8 layers, 64 ctx, 1 KV head, 32 dim) | 65,536 |
+| Vocabulary Logits (`g_logits`) | $2048 \times 4\text{ B}$ (2048 vocabulary tokens) | 8,192 |
+| QKV Projection Buffer (`g_qkv_out`) | $(128 + 2 \times 32) \times 4\text{ B}$ | 768 |
+| Hidden State Vector (`g_x`) | $128 \times 4\text{ B}$ | 512 |
+| Normalized State (`g_xnorm`) | $128 \times 4\text{ B}$ | 512 |
+| Attention Projection (`g_attn_out`) | $128 \times 4\text{ B}$ | 512 |
+| Dense Projection (`g_proj_out`) | $128 \times 4\text{ B}$ | 512 |
+| MLP Gate Projection (`g_mlp_gate`) | $192 \times 4\text{ B}$ | 768 |
+| MLP Up Projection (`g_mlp_up`) | $192 \times 4\text{ B}$ | 768 |
+| SwiGLU Intermediate (`g_mlp_hidden`) | $192 \times 4\text{ B}$ | 768 |
+| MLP Down Projection (`g_mlp_out`) | $128 \times 4\text{ B}$ | 512 |
+| Attention Score Buffer (`g_att`) | $64 \times 4\text{ B}$ | 256 |
+| **Total Arena Footprint** | **Mapped in 160 KB Pool** | **145,152 B (~141.8 KB)** |
+
+#### ESP8266 Target ($CTX=28, N_{embd}=64, N_{layer}=4$)
+| Allocation Target | Dimension / Calculation | Bytes |
+|---|---|---|
+| Key Cache (`g_kbuf`) | $4 \times 28 \times 1 \times 32 \times 4\text{ B}$ (4 layers, 28 ctx, 1 KV head, 32 dim) | 14,336 |
+| Value Cache (`g_vbuf`) | $4 \times 28 \times 1 \times 32 \times 4\text{ B}$ (4 layers, 28 ctx, 1 KV head, 32 dim) | 14,336 |
+| Vocabulary Logits (`g_logits`) | $2048 \times 4\text{ B}$ (2048 vocabulary tokens) | 8,192 |
+| Intermediate Activation Buffers | Sum of activation vectors | 2,672 |
+| **Total Arena Footprint** | **Static BSS Buffer (Zero Heap Allocation)** | **39,536 B (~38.6 KB)** |
+
+### 4.3 Pinned Few-Shot Sliding Window Management
+When conversation context reaches capacity ($ctx\_len \ge INFER\_CTX$):
+1. Pinned few-shot prompt tokens ($[0 \dots few\_shot\_len - 1]$) remain fixed at the head of `ctx_ids`.
+2. Oldest conversational turns starting at index $few\_shot\_len$ are shifted left using `memmove`.
+3. The evaluation index is invalidated: `if (ctx_pos > evict_idx) ctx_pos = evict_idx;`.
+4. Subsequent forward passes recompute exact RoPE coordinates and KV cache activations for the shifted positions, preventing positional drift or numerical degradation across infinite turns.
+
+---
+
+## 5. Execution Safeguards & Coprocessors
+
+### 5.1 Watchdog Feeding & Microsecond Time Slicing
+To comply with ESP8266 NonOS SDK watchdog limits (~1.5 s maximum blocking duration):
+* Wi-Fi hardware is shut down at startup (`WiFi.mode(WIFI_OFF); WiFi.forceSleepBegin();`) to reclaim ~15 KB of internal SRAM and suspend RF background interrupts.
+* Hardware watchdog timers are configured via `ESP.wdtEnable(5000)`.
+* Inner GEMM loops call `llm_optimistic_yield(64)`, which executes `ESP.wdtFeed()`, `optimistic_yield(1000)`, and standard `yield()` to service SDK task queues.
+
+### 5.2 Deterministic Arithmetic Harness
+Before triggering transformer prefill, user input is passed through an integrated recursive-descent math parser (`try_evaluate_math`):
+* **Supported Operations**: Addition (`+`), Subtraction (`-`), Multiplication (`*`), Division (`/`), Modulo (`%`), Exponentiation (`^`), Unary Negation (`-`), Nested Parentheses (`(...)`), and floating-point literals.
+* **Natural Language Stripping**: Automatically strips leading query patterns (`what is`, `calculate`, `calc`, `solve`, `evaluate`, `compute`, `how much is`) and trailing symbols (`?`, `=`).
+* **Execution**: Evaluates with exact precision and 0 ms inference latency, immediately inserting the turn into `ctx_ids` to maintain contextual history.
+
+### 5.3 Token Sampling & Repetition Suppression
+* **Temperature Scaling**: Logits are scaled by temperature ($T = 0.5$) before softmax and cumulative distribution function (CDF) sampling:
+  $$P(v_i) = \frac{\exp(z_i / T)}{\sum_j \exp(z_j / T)}$$
+* **Recency-Weighted Repetition Penalty**: Recent token IDs within a sliding window of the last 20 generated tokens receive a direct logit subtraction:
+  $$z_k \leftarrow z_k - 1.6 \quad (\forall k \in \mathcal{W}_{\text{recent}})$$
+* **Turn Termination**: Generation terminates upon producing token ID `0` (`<|endoftext|>`), a newline token, or reaching `MAX_GEN_TOKENS`.
+
+## 6. Build, Flash & Interface Workflow
+
+### Prerequisites
+* Python 3.9+ with `torch`, `numpy`, and `pyserial`.
+* PlatformIO Core CLI (`pio`).
+
+### 6.1 Compilation and Flashing
+
+To train the ESP32-S3 model from scratch (requires `model/model_esp32s3.pt`):
+
+```bash
+python main.py --target=esp32s3 --train
+```
+
+To export weights, compile firmware, and flash to an ESP32-S3 (N16R8: 16 MB flash + 8 MB PSRAM):
+
+```bash
+python flash.py esp32s3
+```
+
+To export weights, compile firmware, and flash to an ESP32:
+```bash
+python flash.py esp32
+```
+
+To compile and flash an ESP8266:
+```bash
+python flash.py esp8266
+```
+
+To specify an explicit serial port or baud rate:
+```bash
+python flash.py esp32 -p COM4 -b 115200
+```
+
+To verify compilation without flashing:
+```bash
+python flash.py esp32 --build-only
+```
+
+### 6.2 Serial Monitor
+
+To connect directly to the microcontroller serial stream:
+```bash
+python run.py
+```
+
+Explicit port override:
+```bash
+python run.py -p COM4 -b 115200
+```
+
+### 6.3 Standalone Weight Conversion
+
+To manually regenerate `src/model_weights.hpp` from a model checkpoint:
+```bash
+python convert_model_to_c.py esp32s3
+python convert_model_to_c.py esp32
+python convert_model_to_c.py esp8266
+```
+
+### 6.4 ESP32-S3 Notes (N16R8)
+
+* Requires a 16 MB flash + 8 MB octal-PSRAM module (e.g. ESP32-S3-WROOM-1-N16R8 / DevKitC-1 N16R8).
+  The `esp32s3` env overrides the base DevKitC-1 board with `qio_opi` PSRAM mode, 16 MB flash,
+  and a custom `partitions_s3_16MB.csv` layout (single ~15.9 MB app partition, no OTA, no
+  spiffs/coredump — the firmware uses neither, so every byte goes to the model).
+* Export storage formats (all applied post-training in `convert_model_to_c.py`):
+  ternary Base-3 packed weights, per-group **FP16** scales (firmware converts via `half_to_float`,
+  max error ~8e-4 vs FP32), per-token **INT8** embedding table + FP32 row scales
+  (logit error ~5e-4 relative). Router, norms, and RoPE stay FP32.
+* The ~4.0 MB inference arena is allocated in PSRAM via `ps_malloc` (SRAM fallback attempted,
+  boot fails gracefully with `[FAIL]` if neither fits). Firmware prints PSRAM size at startup.
+* `INFER_CTX` (512) is compile-time checked against the trained `block_size`
+  (`static_assert` in `main.cpp`): always re-export weights after retraining.
+
+---
+
+## 7. Dataset & Training
+
+### 7.1 Dataset (`dataset.txt`, `build_dataset.py`)
+
+The chatbot dataset is **generated deterministically** (seed 1337) by `build_dataset.py`, which merges
+the checked-in conversational base with a large synthetic set and writes `dataset.txt`:
+
+```bash
+python build_dataset.py
+```
+
+Current stats: **99,823 pairs, ~2.4 M tokens, 5.6 MB**, format `User: <question>` / `Bot: <answer>`
+line pairs (the exact shape `main.py`'s loader expects).
+
+* **Persona is locked**: Chatty, a tiny AI chatbot running on a microcontroller, created by
+  developers. Identity answers are repeated across hundreds of paraphrases so the model learns
+  them exactly. Honest limits are drilled the same way: no internet, clock, camera, or body.
+* **Content families**: greetings, feelings/small-talk, capabilities, jokes (~80), fun facts (~100),
+  world capitals, word definitions, ELI5 explainers, advice, micro-stories/poems, riddles,
+  exact arithmetic (thousands of programmatic pairs), numbers/order, spelling, opposites/plurals,
+  mini-translations, unit conversions, school one-liners, motivation, plus graceful
+  *I-don't-know* fallbacks (gibberish, unknown words, politics/religion deflects).
+* **Robustness by construction**: every question ships in many noisy surface forms
+  (case, punctuation, elongations, fillers, light typos) and most questions map to several valid
+  answers, teaching paraphrase tolerance and response diversity instead of robotic repeats.
+* **Length discipline**: every pair is length-gated with the real BPE tokenizer
+  (question ≤ 48, answer ≤ 84, pair ≤ 160 tokens; observed max 73), so nothing is ever
+  truncated by the 512-token training block and batches stay clean.
+* The legacy base pairs were persona-normalized by the generator
+  (`trained by researchers` → `created by developers`) for a single consistent creator story.
+
+### 7.2 Training
+
+```bash
+python main.py --target=esp32s3 --train   # ~65 M-param S3 model (default 25k iters)
+python main.py --target=esp32 --train
+python main.py --target=esp8266 --train
+```
+
+Training uses QAT (BitLinear fake-quantization), cosine schedule with warmup, MoE load-balance
+aux loss, label smoothing, gradient clipping, and early stopping on a held-out 10% split with
+automatic best-checkpoint restore (`*.pt.best`) plus post-training quantization (`*.pt.quantized`,
+the artifact the firmware export consumes). On Apple Silicon the S3 run is roughly a day;
+`flash.py <target>` re-exports weights and flashes in one step.
+
+Realistic expectations: the S3 bot is coherent and personable inside its drilled lane
+(greetings, chit-chat, jokes, facts, simple Q&A, exact arithmetic via the on-device harness),
+single-turn only, greedy-decoded, and unreliable outside its training distribution.
+The highest-ROI future upgrade is **distillation** — replacing template answers with
+frontier-model outputs and retraining.

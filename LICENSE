@@ -1,0 +1,31 @@
+MIT License
+
+Copyright (c) 2026 wuy1220 — 中文人设分支新增部分
+
+适用范围：本许可证覆盖本仓库中由本项目新增的内容，包括中文词表（persona/vocab_zh.json）、
+人设词典与语料工厂（persona/stance_lexicon.py、gen_*_corpus.py）、意图规则层
+（intent_rules.py、gen_rules_cpp.py）、训练与导出脚本、以及 docs/ 下的文档。
+
+它不改变上游作者对其原始推理引擎代码（src/inference.hpp、main.cpp 原有结构、
+platformio.ini、权重打包格式）的权利。上游仓库 https://github.com/ahmedbarakat207/espllm
+未声明开源许可证，复用那部分请自行确认上游要求。
+
+---
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

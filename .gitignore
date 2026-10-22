@@ -1,0 +1,32 @@
+# ── 构建产物 ────────────────────────────────────────────────
+.pio/
+.vscode/
+compile_commands.json
+.registry_platform.json
+*.bin
+
+# ── Python ──────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+
+# ── 训练产物（体积大，且可由脚本重建）───────────────────────
+model/
+data/
+bench_fs/
+bench_unpack/
+*.pt
+*.quantized
+dataset*.txt
+dataset*.txt.mask
+
+# ── 本地归档（历史日志 / 权重头文件备份，不发布）────────────
+logs/
+archive/
+_*.py
+_*.log
+
+# ── 杂项 ────────────────────────────────────────────────────
+todo.txt
+.DS_Store
+Thumbs.db
