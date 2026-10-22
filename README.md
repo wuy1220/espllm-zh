@@ -62,7 +62,7 @@ include/ lib/           PlatformIO 占位
 persona/                人设：stance_lexicon.py(词典唯一真相) / vocab_zh.json / 设定卡 / 方案文档
 main.py                 PyTorch 训练（训练时即 QAT）
 convert_model_to_c.py   导出 C++ 权重头文件（ternary 位打包 + int8 词表）
-check_arch_sync.py      构建闸门：头文件常量 vs checkpoint 架构，不一致拒绝构建
+check_arch_sync.py      构建闸门：头文件常量 vs 自报架构，不一致拒绝构建（extra_scripts.py 在编译前调它）
 intent_rules.py         意图规则唯一入口 → gen_rules_cpp.py 生成 C++
 coverage_zh_rules.py    规则覆盖回归（60 条）
 check_lexicon.py        词典三条硬约束：答案不以概念名开头 / 跨概念开头 2 字唯一 / 字表内

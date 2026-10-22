@@ -31,6 +31,9 @@ FIELDS = {
     "model_n_experts": "n_experts",
 }
 
+# `// arch:` 注释里用的是短名（vocab=1850），与 __arch__ 的键名不同
+COMMENT_ALIAS = {"vocab_size": "vocab"}
+
 
 def parse_header(path):
     if not os.path.exists(path):
@@ -112,14 +115,58 @@ def load_arch(path):
     }
 
 
+def parse_header_arch_comment(path):
+    """读 `// arch: k=v k=v …` 注释，返回 dict。转换器每次导出都会写这行。"""
+    txt = open(path, encoding="utf-8").read()
+    m = re.search(r"^// arch:\s*(.+)$", txt, re.M)
+    if not m:
+        return None
+    out = {}
+    for kv in m.group(1).split():
+        if "=" in kv:
+            k, v = kv.split("=", 1)
+            out[k] = int(v) if v.isdigit() else v
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("ckpt", nargs="?", default=None)
     ap.add_argument("--ckpt", dest="ckpt_opt", default=None)
     ap.add_argument("--hpp", default=HPP)
+    ap.add_argument(
+        "--header-only",
+        action="store_true",
+        help="只校验头文件自洽（常量 == arch 注释），不加载 checkpoint，无需 torch。"
+             "供 PlatformIO 构建闸门使用。",
+    )
     a = ap.parse_args()
 
     src, consts = parse_header(a.hpp)
+
+    if a.header_only:
+        claimed = parse_header_arch_comment(a.hpp)
+        if claimed is None:
+            print(f"MISMATCH — {a.hpp} 里没有 `// arch:` 注释行，无法自洽校验。")
+            print("  重新导出：ESPGPT_CHAR_VOCAB=persona/vocab_zh.json python convert_model_to_c.py <name>")
+            sys.exit(1)
+        bad = []
+        for hname, akey in FIELDS.items():
+            hv = consts[hname]
+            av = claimed.get(akey, claimed.get(COMMENT_ALIAS.get(akey, akey)))
+            if av is None:
+                bad.append(f"  {akey}: 注释里没有这一项")
+            elif hv != av:
+                bad.append(f"  {akey}: 常量={hv} vs 注释={av}")
+        if consts.get("model_newline_id") is None:
+            bad.append("  model_newline_id: 缺失（换行 token 会退回硬编码）")
+        if bad:
+            print(f"MISMATCH — {a.hpp} 的常量与它自报的架构不一致：")
+            print("\n".join(bad))
+            sys.exit(1)
+        print(f"header-only OK — {a.hpp} 自洽（来源 {src or '未知'}）")
+        return
+
     ckpt = a.ckpt_opt or a.ckpt or src
     if not ckpt:
         sys.exit(
