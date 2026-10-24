@@ -78,7 +78,11 @@ KL_SET = ["你是谁", "你住哪", "你几岁", "今天好热", "今天好冷",
 def gen(q, temp=0.0, seed=0, maxnew=40):
     _, out, _ = gen_long.run(PROMPT.format(q), win=64, maxnew=maxnew, seed=seed,
                              temp=temp, topk=40, rep=1.0, repwin=20)
-    return gen_long.dec(out).split("\n")[0].strip()
+    text = gen_long.dec(out).split("\n")[0].strip()
+    tags = os.environ.get("ESPGPT_PLAN_TAGS", "")
+    if tags and text[:1] in tags:
+        text = text[1:].lstrip()
+    return text
 
 
 def head_match(g, pool, k=2):

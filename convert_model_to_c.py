@@ -626,7 +626,9 @@ if os.path.exists(OUTPUT_PATH) and os.path.getsize(OUTPUT_PATH) > 0:
     _bak = OUTPUT_PATH + ".bak-" + time.strftime("%Y%m%d-%H%M%S")
     shutil.copy2(OUTPUT_PATH, _bak)
     print(f"previous header saved -> {_bak}")
-with open(OUTPUT_PATH, "w") as f:
+# Headers are consumed by UTF-8 tooling (including check_arch_sync.py).  Do
+# not let the host Windows code page corrupt the generated comment banner.
+with open(OUTPUT_PATH, "w", encoding="utf-8", newline="\n") as f:
     f.write("\n".join(sections))
 file_kb = os.path.getsize(OUTPUT_PATH) / 1024
 print(f"\nWrote {OUTPUT_PATH }  ({file_kb :.0f} KB source)")

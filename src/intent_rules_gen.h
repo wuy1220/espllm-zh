@@ -92,6 +92,18 @@ static const char* pick_flash(const char* const* arr, size_t n) {
         kZhMetaKw_00, kZhMetaKw_01, kZhMetaKw_02, kZhMetaKw_03, kZhMetaKw_04, kZhMetaKw_05,
         kZhMetaKw_06, kZhMetaKw_07, kZhMetaKw_08,
     };
+    static const char kZhOodKw_00[] PROGMEM = "天平";
+    static const char kZhOodKw_01[] PROGMEM = "剪镜毯";
+    static const char kZhOodKw_02[] PROGMEM = "冰淇淋";
+    static const char kZhOodKw_03[] PROGMEM = "区块链";
+    static const char kZhOodKw_04[] PROGMEM = "摩天轮";
+    static const char kZhOodKw_05[] PROGMEM = "火箭";
+    static const char kZhOodKw_06[] PROGMEM = "邮票";
+    static const char kZhOodKw_07[] PROGMEM = "比特币";
+    static const char* const kZhOodKw[] PROGMEM = {
+        kZhOodKw_00, kZhOodKw_01, kZhOodKw_02, kZhOodKw_03, kZhOodKw_04, kZhOodKw_05,
+        kZhOodKw_06, kZhOodKw_07,
+    };
     static const char kZhAffectionKwNo_00[] PROGMEM = "什么";
     static const char* const kZhAffectionKwNo[] PROGMEM = {
         kZhAffectionKwNo_00,
@@ -476,6 +488,13 @@ static const char* pick_flash(const char* const* arr, size_t n) {
     static const char* const kZhMetaRep[] PROGMEM = {
         kZhMetaRep_00, kZhMetaRep_01, kZhMetaRep_02, kZhMetaRep_03,
     };
+    static const char kZhOodRep_00[] PROGMEM = "这个咱不认识，换个幻想乡的说法！";
+    static const char kZhOodRep_01[] PROGMEM = "咱只懂冰和妖精，这个问题问住咱了！";
+    static const char kZhOodRep_02[] PROGMEM = "听起来很厉害，可咱还是更会冻东西！";
+    static const char kZhOodRep_03[] PROGMEM = "这个不在咱的知识里，咱不乱说！";
+    static const char* const kZhOodRep[] PROGMEM = {
+        kZhOodRep_00, kZhOodRep_01, kZhOodRep_02, kZhOodRep_03,
+    };
     static const char kZhAffectionRep_00[] PROGMEM = "哼，问这个干什么！咱、咱才不告诉你！";
     static const char kZhAffectionRep_01[] PROGMEM = "喜欢？咱谁都不喜欢……除了冰。";
     static const char kZhAffectionRep_02[] PROGMEM = "你、你突然说什么呢！";
@@ -782,6 +801,11 @@ static const char* match_intent_rules(const char* norm) {
     if (matches_any(norm, kZhMetaKw, sizeof(kZhMetaKw) / sizeof(char*))) {
         g_intent_label = "zh_meta";
         return pick_flash(kZhMetaRep, 4);
+    }
+    // zh_ood (1 phrases, 4 replies)
+    if (matches_any(norm, kZhOodKw, sizeof(kZhOodKw) / sizeof(char*))) {
+        g_intent_label = "zh_ood";
+        return pick_flash(kZhOodRep, 4);
     }
     // zh_affection (2 子句 AND, 4 replies, unless:什么)
     if (!matches_any(norm, kZhAffectionKwNo, sizeof(kZhAffectionKwNo) / sizeof(char*)) && (matches_any(norm, kZhAffectionKw0, sizeof(kZhAffectionKw0) / sizeof(char*)) && matches_any(norm, kZhAffectionKw1, sizeof(kZhAffectionKw1) / sizeof(char*)))) {

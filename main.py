@@ -210,6 +210,16 @@ for _i, _arg in enumerate(sys.argv):
     if _arg.startswith("--init-from="):
         INIT_CHECKPOINT = _arg.split("=", 1)[1].strip()
 
+# Optional MobileMoE-style shared expert. Disabled by default so the shipped
+# architecture and checkpoints remain unchanged. The zero gate makes a warm
+# start begin exactly at the old model while allowing the shared path to learn.
+SHARED_EXPERT = os.environ.get("ESPGPT_SHARED_EXPERT", "0") == "1"
+# PC-only cross-layer attention (CLA) A/B.  In each adjacent pair, the
+# second layer reuses the first layer's K/V activations.  The projection still
+# exists in this validation version; export/runtime changes wait for a quality
+# decision.
+CLA = os.environ.get("ESPGPT_CLA", "0") == "1"
+
 torch.manual_seed(1337)
 
 # Dataset selection: --dataset=<path> overrides the default, and
@@ -258,6 +268,11 @@ win_lens = None      # real (unpadded) length of each row of win_mat
 # separate file because the token lines are read in bulk and a sidecar keeps
 # the id-stream format untouched.
 window_masks = None
+window_labels = None
+pref_mat = None
+pref_lens = None
+pref_masks = None
+pref_path = os.environ.get("ESPGPT_PREF_DATASET", "")
 
 if CORPUS_FORMAT == "ids" or (CORPUS_FORMAT == "auto" and is_id_stream):
     CORPUS_FORMAT = "ids"
@@ -326,6 +341,26 @@ if CORPUS_FORMAT == "ids" or (CORPUS_FORMAT == "auto" and is_id_stream):
             )
         else:
             print("  prompt masks: none (whole window trains)")
+        label_path = dataset_path + ".labels"
+        if os.path.isfile(label_path):
+            window_labels = np.array(open(label_path).read().split(), dtype=np.int64)
+            if window_labels.size != n_win:
+                raise SystemExit(f"{label_path}: {window_labels.size:,} labels vs {n_win:,} windows")
+            print(f"  contrastive labels: {len(set(window_labels.tolist()))} classes")
+        if pref_path:
+            with open(pref_path, "r", encoding="utf-8") as pf:
+                plines = [ln.strip() for ln in pf if ln.strip() and not ln.startswith("#")]
+            if len(plines) != n_win:
+                raise SystemExit(f"{pref_path}: {len(plines):,} windows vs {n_win:,} positive windows")
+            pref_lens = np.array([len(x.split()) for x in plines], dtype=np.int32)
+            pw = int(pref_lens.max())
+            pref_mat = np.zeros((n_win, pw), dtype=np.int16)
+            for pi, pl in enumerate(plines):
+                pref_mat[pi, :pref_lens[pi]] = np.array(pl.split(), dtype=np.int16)
+            pm = pref_path + ".mask"
+            if os.path.isfile(pm):
+                pref_masks = np.array(open(pm).read().split(), dtype=np.int8)
+            print(f"  preference corpus: {n_win:,} aligned windows")
         # Drop the ~1.2 GB of raw text now that the ids are in the matrix.
         del body, raw_lines
     else:
@@ -427,6 +462,8 @@ def arch_spec():
         "moe_hidden": moe_hidden,
         "group_size": qat_group_size,
         "vocab_size": vocab_size,
+        "shared_expert": SHARED_EXPERT,
+        "cla": CLA,
     }
 
 
@@ -761,7 +798,7 @@ def _sample_train_idx():
     return random.choice(_sample_pools[k][0])
 
 
-def get_batch(split):
+def get_batch(split, with_meta=False):
     if split == "train" and _sample_pools is not None:
         idxs = [_sample_train_idx() for _ in range(batch_size)]
     else:
@@ -776,6 +813,21 @@ def get_batch(split):
 
     x = torch.stack(x_batch).to(device)
     y = torch.stack(y_batch).to(device)
+    if with_meta:
+        labels = []
+        prefs = []
+        pref_ys = []
+        for i in idxs:
+            labels.append(int(window_labels[i]) if window_labels is not None and i < len(window_labels) else -1)
+            if pref_mat is not None:
+                p = int(pref_lens[i])
+                pp = int(pref_masks[i]) if pref_masks is not None else 0
+                px, py = _pad_window(pref_mat[i, :p], pp)
+                prefs.append(px)
+                pref_ys.append(py)
+        pref = torch.stack(prefs).to(device) if prefs else None
+        pref_y = torch.stack(pref_ys).to(device) if pref_ys else None
+        return x, y, torch.tensor(labels, device=device, dtype=torch.long), pref, pref_y
     return x, y
 
 
@@ -784,6 +836,48 @@ def get_batch(split):
 # can be settled by two otherwise identical training runs instead of by argument.
 WEIGHT_BITS = float(os.environ.get("ESPGPT_WEIGHT_BITS", "1.58"))
 BINARY_WEIGHTS = WEIGHT_BITS <= 1.0
+CONTRASTIVE_WEIGHT = float(os.environ.get("ESPGPT_CONTRASTIVE_WEIGHT", "0"))
+PREFERENCE_WEIGHT = float(os.environ.get("ESPGPT_PREFERENCE_WEIGHT", "0"))
+PREFERENCE_MARGIN = float(os.environ.get("ESPGPT_PREFERENCE_MARGIN", "0.5"))
+
+
+def preference_loss(model, pos_x, pos_y, neg_x, neg_y):
+    """Prefer the positive answer likelihood for aligned prompt windows."""
+    if neg_x is None or neg_y is None:
+        return pos_x.new_zeros(())
+    pos_logits, _, _ = model(pos_x, pos_y, return_hidden=True)
+    # The preference corpus has the same prompt, so compare full-window token
+    # likelihoods only after the prompt mask. Reuse positive labels as the
+    # target mask; differing answer lengths are normalized by valid token count.
+    neg_logits, _, _ = model(neg_x, neg_y, return_hidden=True)
+    lp = F.log_softmax(pos_logits.float(), dim=-1)
+    ln = F.log_softmax(neg_logits.float(), dim=-1)
+    vp = pos_y != -100
+    vn = neg_y != -100
+    ip = pos_y.clamp_min(0)
+    inn = neg_y.clamp_min(0)
+    sp = (lp.gather(-1, ip.unsqueeze(-1)).squeeze(-1) * vp).sum(1) / vp.sum(1).clamp_min(1)
+    sn = (ln.gather(-1, inn.unsqueeze(-1)).squeeze(-1) * vn).sum(1) / vn.sum(1).clamp_min(1)
+    return F.relu(PREFERENCE_MARGIN - (sp - sn)).mean()
+
+
+def supervised_contrastive_loss(hidden, labels, temperature=0.2):
+    """Cosine supervised contrastive loss over valid concept-labelled windows."""
+    valid = labels >= 0
+    if int(valid.sum()) < 2:
+        return hidden.new_zeros(())
+    z = F.normalize(hidden[valid], dim=-1)
+    y = labels[valid]
+    sim = z @ z.t() / temperature
+    eye = torch.eye(sim.size(0), device=sim.device, dtype=torch.bool)
+    sim = sim.masked_fill(eye, float("-inf"))
+    pos = (y[:, None] == y[None, :]) & ~eye
+    counts = pos.sum(dim=1)
+    keep = counts > 0
+    if not bool(keep.any()):
+        return hidden.new_zeros(())
+    logp = sim - torch.logsumexp(sim, dim=1, keepdim=True)
+    return -(logp.masked_fill(~pos, 0.0).sum(dim=1)[keep] / counts[keep]).mean()
 
 
 class BitLinear(nn.Module):
@@ -984,6 +1078,9 @@ class SparseMoEBlock(nn.Module):
         self.experts = nn.ModuleList(
             [SwiGLUMLP(n_embd, hidden, dropout, group_size) for _ in range(n_experts)]
         )
+        if SHARED_EXPERT:
+            self.shared_expert = SwiGLUMLP(n_embd, hidden, dropout, group_size)
+            self.shared_scale = nn.Parameter(torch.zeros(()))
 
     def forward(self, x):
         B, T, C = x.size()
@@ -1095,6 +1192,8 @@ class SparseMoEBlock(nn.Module):
                     out_flat[mask] = expert_out
                 else:
                     out_flat = out_flat + 0.0 * expert(dummy).sum()
+        if SHARED_EXPERT:
+            out_flat = out_flat + self.shared_scale * self.shared_expert(x_flat)
         out = out_flat.view(B, T, C)
         route_frac = torch.bincount(
             top1_indices, minlength=self.n_experts
@@ -1127,7 +1226,7 @@ class CausalSelfAttention(nn.Module):
             persistent=False,
         )
 
-    def forward(self, x, cos, sin):
+    def forward(self, x, cos, sin, shared_kv=None, return_kv=False):
         B, T, C = x.size()
         qkv = self.qkv(x)
         q, k, v = qkv.split(
@@ -1142,7 +1241,11 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, n_kv_head, self.head_dim).transpose(1, 2)
         v = v.view(B, T, n_kv_head, self.head_dim).transpose(1, 2)
         q = apply_rope(q, cos, sin)
-        k = apply_rope(k, cos, sin)
+        if shared_kv is None:
+            k = apply_rope(k, cos, sin)
+        else:
+            k, v = shared_kv
+        cache_kv = (k, v)
         k = k.repeat_interleave(self.n_head // n_kv_head, dim=1)
         v = v.repeat_interleave(self.n_head // n_kv_head, dim=1)
         att = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
@@ -1152,6 +1255,8 @@ class CausalSelfAttention(nn.Module):
         y = att @ v
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.resid_drop(self.proj(y))
+        if return_kv:
+            return y, cache_kv
         return y
 
 
@@ -1182,10 +1287,16 @@ class Block(nn.Module):
         self.ln2 = RMSNorm(n_embd)
         self.mlp = SparseMoEBlock(n_embd, n_experts, hidden, dropout, group_size)
 
-    def forward(self, x, cos, sin):
-        x = x + self.attn(self.ln1(x), cos, sin)
+    def forward(self, x, cos, sin, shared_kv=None, return_kv=False):
+        attn_out = self.attn(self.ln1(x), cos, sin, shared_kv=shared_kv,
+                             return_kv=return_kv)
+        if return_kv:
+            attn_out, kv = attn_out
+        x = x + attn_out
         mlp_out, aux_loss = self.mlp(self.ln2(x))
         x = x + mlp_out
+        if return_kv:
+            return x, aux_loss, kv
         return x, aux_loss
 
 
@@ -1225,14 +1336,26 @@ class Transformer(nn.Module):
         elif isinstance(module, BitLinear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, return_hidden=False):
         B, T = idx.size()
         x = self.tok_emb(idx)
         cos = self.rope_cos[:T].to(x.device)
         sin = self.rope_sin[:T].to(x.device)
         total_aux_loss = 0.0
-        for block in self.blocks:
-            x, aux_loss = block(x, cos, sin)
+        shared_kv = None
+        for layer_idx, block in enumerate(self.blocks):
+            use_cla = CLA and (layer_idx % 2 == 1)
+            block_out = block(
+                x, cos, sin,
+                shared_kv=shared_kv if use_cla else None,
+                return_kv=CLA,
+            )
+            if CLA:
+                x, aux_loss, block_kv = block_out
+                if not use_cla:
+                    shared_kv = block_kv
+            else:
+                x, aux_loss = block_out
             total_aux_loss += aux_loss
         x = self.ln_f(x)
         logits = self.lm_head(x)
@@ -1244,6 +1367,8 @@ class Transformer(nn.Module):
                 label_smoothing=label_smoothing,
             )
             loss = ce_loss + 0.01 * total_aux_loss
+        if return_hidden:
+            return logits, loss, x
         return logits, loss
 
     @torch.no_grad()
@@ -1338,7 +1463,8 @@ def train():
     if INIT_CHECKPOINT and os.path.isfile(INIT_CHECKPOINT):
         print(f"Warm start from {INIT_CHECKPOINT}...")
         model.load_state_dict(load_checkpoint(INIT_CHECKPOINT, model,
-                                              map_location=device))
+                                              map_location=device),
+                              strict=not SHARED_EXPERT)
         model.to(device)
         # Under DeepSpeed the optimizer holds fp32 master copies created at
         # initialize() time, so pushing the state dict through the engine is
@@ -1405,14 +1531,19 @@ def train():
                     if is_main:
                         print("Early stopping triggered.")
                     break
-        xb, yb = get_batch("train")
+        xb, yb, batch_labels, pref_x, pref_y = get_batch("train", with_meta=True)
         try:
             if engine is not None:
                 logits, loss = engine(xb, yb)
                 engine.backward(loss)
                 engine.step()
             else:
-                logits, loss = model(xb, yb)
+                logits, loss, hidden = model(xb, yb, return_hidden=True)
+                if CONTRASTIVE_WEIGHT:
+                    c_loss = supervised_contrastive_loss(hidden.mean(dim=1), batch_labels)
+                    loss = loss + CONTRASTIVE_WEIGHT * c_loss
+                if PREFERENCE_WEIGHT:
+                    loss = loss + PREFERENCE_WEIGHT * preference_loss(model, xb, yb, pref_x, pref_y)
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -1441,7 +1572,8 @@ def train():
     save_checkpoint(model, checkpoint)
     print("Full-precision model saved to", checkpoint)
     if os.path.isfile(checkpoint + ".best"):
-        model.load_state_dict(load_checkpoint(checkpoint + ".best", model, map_location=device))
+        model.load_state_dict(load_checkpoint(checkpoint + ".best", model, map_location=device),
+                              strict=not SHARED_EXPERT)
         model.eval()
         print("Loaded best checkpoint for quantization.")
     q_model = convert_to_bitlinear(deepcopy(model))
@@ -1464,7 +1596,8 @@ def load_model():
     # which cannot be optimized. Load the full-precision weights instead.
     if INIT_CHECKPOINT and os.path.isfile(INIT_CHECKPOINT):
         print(f"Warm start from {INIT_CHECKPOINT}...")
-        model.load_state_dict(load_checkpoint(INIT_CHECKPOINT, model, map_location=device))
+        model.load_state_dict(load_checkpoint(INIT_CHECKPOINT, model, map_location=device),
+                              strict=not SHARED_EXPERT)
         model.to(device)
         print("Warm start loaded.")
         return
@@ -1483,7 +1616,8 @@ def load_model():
         src = checkpoint
     if src:
         print(f"Loading unquantized checkpoint from {src } and quantizing...")
-        model.load_state_dict(load_checkpoint(src, model, map_location=device))
+        model.load_state_dict(load_checkpoint(src, model, map_location=device),
+                              strict=not SHARED_EXPERT)
         model.eval()
         q_model = convert_to_bitlinear(deepcopy(model))
         with gzip.open(checkpoint + ".quantized", "wb") as f:

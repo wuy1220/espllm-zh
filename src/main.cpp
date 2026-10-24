@@ -24,18 +24,12 @@ static constexpr int GRP             = model_group_size;
 // the binding constraint on depth: a 6th layer wanted 7,072 more and did not
 // fit.
 //
-// 64 is a free cut.  Window size does not move the quality numbers -- rep8 and
-// distinct-4 stay in 0.93..0.99 across 32/64/104/128 (PC, 200-token runs,
-// documented in project_state.md 16.1), and the board reproduces it.  What it
-// buys is 13,600 B of arena (5 layers: 35,360 -> 21,760) and ~20% off the
-// attention scan, which is where the extra 50 ms/token of a full window comes
-// from: 32 slots run 97 ms/tok, 104 slots 150 ms/tok, i.e. ~0.72 ms per slot.
-//
-// Chat still fits exactly: the prefill reserve below holds the prompt to
-// INFER_CTX - CHAT_MAX_TOKENS = 24 tokens and the reply to 40.  Stories no
-// longer have to fit at all -- ctx_slide() drops the oldest slots and keeps
-// every cached row valid, so :len can exceed the window by any amount.
-static constexpr int INFER_CTX       = (64 < (int)model_block_size) ? 64 : (int)model_block_size;
+// 104 positions use 35,360 B for the 5-layer KV cache and fit the 40 KB arena
+// with the inference scratch buffers (ARENA_NEED is checked below).  This lets
+// history mode retain one complete prior exchange plus the current prompt while
+// reserving 20 positions for the reply. Older turns are evicted at a User boundary
+// so a larger cache does not preserve stale topics that compete with the latest one.
+static constexpr int INFER_CTX       = (104 < (int)model_block_size) ? 104 : (int)model_block_size;
 // Two budgets: a story may fill the window, a chat reply is one short
 // paragraph. The chat cap exists because the model does not always emit the
 // newline that normally ends a reply -- without it a single chat turn ran for
@@ -44,11 +38,14 @@ static constexpr int MAX_GEN_TOKENS  = 80;
 // 40, not 32: on the mixed13 board run 5 of 36 replies were cut mid-clause by
 // this budget, every one of them a normally-flowing sentence that just needed a
 // few more tokens (e.g. `"...and said, \"Do you want"`).  The prefill trim at
-// line ~992 uses MAX_GEN_TOKENS (80), so chat prompts keep their 24-token
-// budget either way; 24 + 40 = 64 stays well under INFER_CTX, and the window
-// never fills, so ctx_push never memmoves.  Cost is wall time (40*88ms = 3.5s),
+// chat prefill trim reserves CHAT_MAX_TOKENS, leaving up to 64 prompt tokens;
+// 64 + 40 = 104 fits INFER_CTX, so a normal chat turn does not slide the cache.
+// The separate story prefill path uses MAX_GEN_TOKENS (80).
+// Cost is wall time (40*88ms = 3.5s),
 // which is the right side of the trade at this quality level.
 static constexpr int CHAT_MAX_TOKENS = 40;
+// Compact multi-turn rows keep the prior exchange plus prompt within the 104-token window.
+static constexpr int HISTORY_CHAT_MAX_TOKENS = 20;
 // 0.7, not 0.85: re-measured on hardware after the opener corpus rebuild
 // (mixed13, 78 replies per setting, board_temp_sweep.py).  The old argument for
 // 0.85 no longer holds -- it was that 0.7 pushed the "Once upon a time" opener
@@ -105,8 +102,8 @@ static MemoryArena* arena = nullptr;
 #endif
 
 static float* g_x;
-// KV cache is int8 with one fp16 scale per (layer, position, kv-head). Storing
-// it as float would need 65536 B at INFER_CTX=64, which exceeds the 40KB arena.
+// KV cache is int8 with one fp16 scale per (layer, position, kv-head). Float
+// storage would exceed the 40 KB arena at the current 104-position window.
 static int8_t*  g_kbuf;
 static int8_t*  g_vbuf;
 static uint16_t* g_kscale;
@@ -459,6 +456,9 @@ static void echo_print(const char* s, int len) {
 // 0 = drop a token and re-encode the whole window (exact, ~100x slower).
 // Runtime-selectable so the two paths can be A/B'd on the same seed.
 static int g_ctx_slide = 1;
+// Experimental multi-turn chat. Default stays single-turn so existing
+// firmware behavior and latency are unchanged; :history 1 preserves turns.
+static int g_chat_history = 0;
 // Slide cost accounting, printed at the end of a turn.  The two halves are
 // tunable independently (block size vs. renumber interval) and the split is
 // the only way to know which one to attack.
@@ -525,8 +525,8 @@ static void rope_rotate_back(float* x, const float* cos_d, const float* sin_d, i
     for (int i = 0; i < dim; ++i) x[i] = t[i];
 }
 
-static void ctx_renumber(int delta) {
-    if (delta <= 0 || ctx_len <= 0) return;
+static void ctx_renumber(int delta, int rows) {
+    if (delta <= 0 || rows <= 0) return;
     uint32_t t0 = micros();
     const int half = HEAD_DIM / 2;
     const float* cos_d = rope_cos + delta * half;
@@ -535,7 +535,7 @@ static void ctx_renumber(int delta) {
     for (int l = 0; l < N_LAYER; ++l) {
         int8_t*   kq = g_kbuf   + (size_t)l * KV_STRIDE;
         uint16_t* ks = g_kscale + (size_t)l * KS_STRIDE;
-        for (int s = 0; s < ctx_len; ++s) {
+        for (int s = 0; s < rows; ++s) {
             for (int h = 0; h < N_KV_HEAD; ++h) {
                 int8_t* kp = kq + (size_t)s * KV_ROW + h * HEAD_DIM;
                 const float sc = half_to_float(ks[s * N_KV_HEAD + h]);
@@ -574,16 +574,49 @@ static void ctx_slide(int n) {
     ctx_len  -= n;
     ctx_shift += n;
     ctx_pos   = ctx_len;   // every surviving row is still prefilled
-    // Keep the next query inside the table.  With INFER_CTX=64 and 128 rows
-    // this triggers every 65 slides instead of every 25, so the rotation is
-    // paid less often than it was at 104 -- one more reason the narrower window
-    // is cheaper than it looks.
+    // Keep the next query inside the table. With INFER_CTX=104 and 128 rows,
+    // renumbering triggers every 25 slides; a 64-position window triggers every
+    // 65 slides, but retains less history.
     // Charge only the memmove to the slide bucket; ctx_renumber times itself,
     // and the two are tuned by different knobs.
     g_slide_us += (uint32_t)(micros() - t0);
     g_slide_n++;
     if (ctx_shift + INFER_CTX - 1 >= (int)model_block_size) {
-        ctx_renumber(ctx_shift);
+        ctx_renumber(ctx_shift, ctx_len);
+    }
+}
+
+// Drop prompt tokens while preserving the already-prefilled prefix. The tail
+// was appended after the previous turn and has ids but no KV rows yet, so the
+// normal ctx_slide() cannot move the whole ctx_len range.
+static void ctx_slide_pending(int n) {
+    if (n <= 0 || ctx_len <= n) return;
+    uint32_t t0 = micros();
+    const int old_len = ctx_len;
+    const int cached = (ctx_pos < old_len) ? ctx_pos : old_len;
+    const int kept = (cached > n) ? (cached - n) : 0;
+    for (int l = 0; l < N_LAYER; ++l) {
+        memmove(g_kbuf + (size_t)l * KV_STRIDE,
+                g_kbuf + (size_t)l * KV_STRIDE + n * KV_ROW,
+                (size_t)kept * KV_ROW);
+        memmove(g_vbuf + (size_t)l * KV_STRIDE,
+                g_vbuf + (size_t)l * KV_STRIDE + n * KV_ROW,
+                (size_t)kept * KV_ROW);
+        memmove(g_kscale + (size_t)l * KS_STRIDE,
+                g_kscale + (size_t)l * KS_STRIDE + n * N_KV_HEAD,
+                (size_t)kept * N_KV_HEAD * sizeof(uint16_t));
+        memmove(g_vscale + (size_t)l * KS_STRIDE,
+                g_vscale + (size_t)l * KS_STRIDE + n * N_KV_HEAD,
+                (size_t)kept * N_KV_HEAD * sizeof(uint16_t));
+    }
+    memmove(ctx_ids, ctx_ids + n, (size_t)(old_len - n) * sizeof(uint16_t));
+    ctx_len = old_len - n;
+    ctx_pos = kept;
+    ctx_shift = kept ? (ctx_shift + n) : 0;
+    g_slide_us += (uint32_t)(micros() - t0);
+    g_slide_n++;
+    if (ctx_shift + INFER_CTX - 1 >= (int)model_block_size) {
+        ctx_renumber(ctx_shift, ctx_pos);
     }
 }
 
@@ -642,6 +675,40 @@ static void ctx_push_str(const char* text) {
         } else {
             p++;
         }
+    }
+}
+
+static bool ctx_text_matches_at(int pos, const char* text) {
+    int token = pos;
+    while (*text) {
+        if (token >= ctx_len) return false;
+        int id = (int)ctx_ids[token++];
+        if (id >= (int)model_vocab_size) return false;
+        uint32_t start = pgm_read_dword(&model_vocab_offsets[id]);
+        uint32_t end = pgm_read_dword(&model_vocab_offsets[id + 1]);
+        if (end <= start) return false;
+        for (uint32_t at = start; at < end; ++at) {
+            if (!*text) return true;
+            if ((char)pgm_read_byte(&model_vocab_bytes[at]) != *text++) return false;
+        }
+    }
+    return true;
+}
+
+static void history_keep_latest_exchange() {
+    int drop = 0;
+    for (int i = 0; i < ctx_len; ++i) {
+        if (ctx_text_matches_at(i, "\nUser: ")) drop = i + 1;
+    }
+    if (drop <= 0) return;
+    if (g_ctx_slide) {
+        if (ctx_pos == ctx_len) ctx_slide(drop);
+        else ctx_slide_pending(drop);
+    } else {
+        memmove(ctx_ids, ctx_ids + drop, (size_t)(ctx_len - drop) * sizeof(uint16_t));
+        ctx_len -= drop;
+        ctx_pos = 0;
+        ctx_shift = 0;
     }
 }
 
@@ -1238,7 +1305,8 @@ static bool try_evaluate_math(const char* raw_input, char* output, size_t out_le
 // ---- Intent rules ------------------------------------------------------
 //
 // Why this layer exists. The checkpoint on the board is 1.30M parameters
-// (1.17M excluding embeddings), 4 layers, n_embd=64, 64-token window. At that
+// (1.17M excluding embeddings), 4 layers, n_embd=64, trained with a 64-token
+// block. Runtime context is now 104 tokens. At that model size,
 // size an open-ended "reply to whatever the user says" task is not learnable,
 // and the measured behaviour confirms it: every chat pair in the corpus is
 // "User: <story summary>\nBot: <story opening>", so `hello` draws a story
@@ -1351,6 +1419,22 @@ static void clear_context() {
     ctx_shift = 0;
 }
 
+static void append_flash_turn(const char* input, const char* reply) {
+    // Intent replies live in PROGMEM. Copy this short line before tokenizing it
+    // when history mode is enabled.
+    char answer[96];
+    int n = 0;
+    while (n < (int)sizeof(answer) - 1) {
+        char c = (char)pgm_read_byte(reply + n);
+        if (!c) break;
+        answer[n++] = c;
+    }
+    answer[n] = '\0';
+    char turn[INFER_CTX * 2];
+    snprintf(turn, sizeof(turn), "User: %s\nBot: %s\n", input, answer);
+    ctx_push_str(turn);
+}
+
 // ---- Serial tuning commands: ":temp <v>" ":topk <n>" ":rep <pen> [win]"
 //      ":greedy"  ":rand"  ":params"  ":help".  Return true if handled.
 static bool handle_tuning_cmd(const char* in) {
@@ -1382,6 +1466,10 @@ static bool handle_tuning_cmd(const char* in) {
         if (g_story_len > STORY_LEN_MAX) g_story_len = STORY_LEN_MAX;
     }
     else if (!strcmp(key, "slide"))  { g_ctx_slide = (v1 != 0.0f) ? 1 : 0; }
+    else if (!strcmp(key, "history")) {
+        g_chat_history = (v1 != 0.0f) ? 1 : 0;
+        if (!g_chat_history) clear_context();
+    }
     else if (!strcmp(key, "help")) {
         Serial.println(F("  :temp <v>   temperature (0=greedy, 0.6-1.2 sampled)"));
         Serial.println(F("  :topk <n>   top-k cutoff (0 = off)"));
@@ -1391,16 +1479,18 @@ static bool handle_tuning_cmd(const char* in) {
         Serial.println(F("  :mode <0|1>  0 = chat (User:/Bot:), 1 = story continuation"));
         Serial.println(F("  :len <n>    story budget in tokens (default 80, max 600)"));
         Serial.println(F("  :slide <0|1>  KV-cache slide (1 = continuous, 0 = re-prefill)"));
+        Serial.println(F("  :history <0|1>  preserve chat turns in the KV window (default 0)"));
         Serial.println(F("  :greedy / :rand / :params"));
         return true;
     }
     else if (!strcmp(key, "params")) { /* fallthrough to print */ }
     else { Serial.println(F("  unknown command (:help)")); return true; }
 
-    Serial.printf("  temp=%.2f  topk=%d  rep=%.2f/%d  mode=%s  rules=%d  echo=%d  len=%d  slide=%d  norep=%d  %s\n",
+    Serial.printf("  temp=%.2f  topk=%d  rep=%.2f/%d  mode=%s  rules=%d  echo=%d  len=%d  slide=%d  history=%d  norep=%d  %s\n",
                   g_temperature, g_topk, g_rep_penalty, g_rep_window,
                   g_mode_story ? "STORY" : "CHAT", g_intent_rules, g_echo,
-                  g_mode_story ? g_story_len : CHAT_MAX_TOKENS, g_ctx_slide,
+                  g_mode_story ? g_story_len : (g_chat_history ? HISTORY_CHAT_MAX_TOKENS : CHAT_MAX_TOKENS),
+                  g_ctx_slide, g_chat_history,
                   g_no_repeat,
                   g_temperature <= 0.0f ? "[GREEDY]" : "[SAMPLED]");
     return true;
@@ -1517,7 +1607,7 @@ static void run_chat() {
     Serial.println();
     if (ilen == 0) return;
 
-    clear_context();
+    if (!g_chat_history || g_mode_story) clear_context();
     // 禁首字环必须跟着轮次一起清。它记的是**前几轮回复**的开头字，而表态模型
     // 每个概念有固定的 2 字签名 —— 不清的话，上一轮答过「冻的」，这轮再问
     // 青蛙就再也吐不出「冻」开头，被迫串到别的概念。英文时代它是防"复读"的
@@ -1547,11 +1637,9 @@ static void run_chat() {
     // never collides, but "what is 2+2 ok" would), and before the model so a
     // greeting is answered by a string instead of by 60 forward passes.
     //
-    // No turn is pushed into the context: run_chat calls clear_context() at the
-    // top of every invocation, so anything pushed here is discarded before it
-    // can ever be read. Returning straight to the model also skips a pointless
-    // ctx_push_str over a ~200-char string, which on a 64-token context would
-    // evict the prompt it just finished.
+    // In default single-turn mode, rule replies are not kept in context.
+    // History mode appends them as completed turns so the next user turn can
+    // refer to them without re-running the rules.
     // 故事模式不走规则层：续写请求里出现的"你是谁"是故事里的一句话，不是
     // 在问设备。中文规则全是子串匹配，不挡就会把叙事句子劫成一句角色台词。
     if (g_intent_rules && !g_mode_story) {
@@ -1562,6 +1650,7 @@ static void run_chat() {
             ban_record_flash(reply);
             sig_record_flash(reply, input);
             print_intent_trace(rule_intent_label());
+            if (g_chat_history) append_flash_turn(input, reply);
             return;
         }
     }
@@ -1613,38 +1702,54 @@ static void run_chat() {
         // case- and punctuation-sensitive, and "Once upon a time" lowercased to
         // "once upon a time" is off-distribution.
         snprintf(prompt, sizeof(prompt), "%s", input);
+        ctx_push_str(prompt);
         Serial.print("Story>");
     } else {
-        // No in-context example here, and that is deliberate: the corpus is
-        // single-turn, so a two-turn prefix is out of distribution -- with one
-        // turned on, every reply collapsed to the same opener. The English
-        // variant of that experiment lived here; it went out with the English
-        // model, the conclusion did not.
-        snprintf(prompt, sizeof(prompt), "User: %s\nBot:", clean_input);
+        // History mode appends the next user turn to the already-prefilled
+        // conversation. Keep the latest completed exchange, which matches the
+        // training context and avoids letting older topics dominate a follow-up.
+        // The previous generation ends in a newline, so do not add another one.
+        if (g_chat_history && ctx_len > 0) {
+            history_keep_latest_exchange();
+            ctx_push_str("User: ");
+            ctx_push_str(clean_input);
+            ctx_push_str("\nBot:");
+        } else {
+            snprintf(prompt, sizeof(prompt), "User: %s\nBot:", clean_input);
+            ctx_push_str(prompt);
+        }
         Serial.print("Bot:");
         // 回声只进显示，不进 prompt —— 模型看不见它，所以它不会去模仿、也不会重复。
         // 用 clean_input（原始输入）而不是 input（已剥尾部标点）：回显要念得像人话。
         echo_print(clean_input, (int)strlen(clean_input));
     }
-    ctx_push_str(prompt);
-    // Reserve room for a whole chat reply before the prefill runs.  clear_context()
-    // ran at the top of the turn, so ctx_pos is 0 and no KV rows exist yet --
-    // dropping the oldest prompt tokens here is free, and it guarantees a chat
-    // reply never triggers a cache slide mid-answer.
+    // Reserve room for the current chat reply. In single-turn mode this is a
+    // cheap token-list trim; in history mode the existing KV rows are trimmed
+    // through ctx_slide so the cache remains aligned with ctx_ids.
     //
-    // The reserve is CHAT_MAX_TOKENS, not MAX_GEN_TOKENS: the chat path only
-    // ever generates CHAT_MAX_TOKENS, so reserving the story budget would throw
-    // away prompt tokens the reply can never use.  With INFER_CTX=64 the
-    // difference is fatal -- 64 - 80 is negative, so the old expression would
-    // have dropped the entire prompt.
+    // History mode uses a smaller reply budget so the preceding turn remains
+    // visible inside the 104-token inference window.
     //
     // Story mode deliberately skips this: :len can be longer than the window,
     // and the whole point of the slide is that the prompt no longer has to be
     // sacrificed to make room for the reply.
-    if (!g_mode_story && ctx_len > INFER_CTX - CHAT_MAX_TOKENS) {
-        int drop = ctx_len - (INFER_CTX - CHAT_MAX_TOKENS);
-        memmove(ctx_ids, ctx_ids + drop, (size_t)(ctx_len - drop) * sizeof(uint16_t));
-        ctx_len -= drop;
+    const int chat_budget = g_chat_history ? HISTORY_CHAT_MAX_TOKENS : CHAT_MAX_TOKENS;
+    if (!g_mode_story && ctx_len > INFER_CTX - chat_budget) {
+        int drop = ctx_len - (INFER_CTX - chat_budget);
+        // Newly appended history prompt tokens have ids but no KV rows yet.
+        // ctx_slide() only moves already-prefilled rows; using it here would
+        // mark those uncached rows as valid and the next sample can terminate
+        // immediately. Re-prefill whenever the prompt tail is still pending.
+        if (ctx_pos == ctx_len && g_ctx_slide) {
+            ctx_slide(drop);
+        } else if (ctx_pos > 0 && g_ctx_slide) {
+            ctx_slide_pending(drop);
+        } else {
+            memmove(ctx_ids, ctx_ids + drop, (size_t)(ctx_len - drop) * sizeof(uint16_t));
+            ctx_len -= drop;
+            ctx_pos = 0;
+            ctx_shift = 0;
+        }
     }
     unsigned long t_start = millis();
     slide_stats_reset();
@@ -1685,7 +1790,7 @@ static void run_chat() {
     int  pend_id[20];
     int  pend_n = 0;
     const int prompt_len = ctx_len;   // 重掷截断点（prompt 前面已截好余量）
-    const int budget = g_mode_story ? g_story_len : CHAT_MAX_TOKENS;
+    const int budget = g_mode_story ? g_story_len : chat_budget;
     const float temp_save = g_temperature;
     // 最多两次机会。第一次采样撞背稿签名：截断 ctx 回 prompt 末尾、提温重抽
     // （注意力严格因果 s<=slot，旧 KV 永不被读，不用重算 prompt）；语料每概念
