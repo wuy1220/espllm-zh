@@ -14,8 +14,9 @@ MoE Transformer，字符级中文词表 **1850** 字，人设是《东方 Projec
 
 | 指标 | 数值 | 口径 |
 |---|---|---|
-| 逐概念命中率 | **198 / 203 = 98%** | 部署模型 `_stance_mt12`，26 概念 × 混合问法，PC 侧 fp32 贪心 |
-| 日常三概念 | **64 / 66 = 97%** | 吃饭 21/22 · 睡觉 22/22 · 玩耍 21/22，PC 侧 `:greedy`；板上 65/66 |
+| 逐概念命中率 | **203 / 203 = 100%** | 部署模型 `_stance_fix4`，26 概念 × 混合问法，PC 侧 fp32 贪心 |
+| 日常三概念 | **66 / 66 = 100%** | 吃饭 22/22 · 睡觉 22/22 · 玩耍 22/22，PC 侧 `:greedy`；板上同为 66/66 |
+| 未见问法 / 陌生词 / KL | 21/26 · 12/14 · 5.52 | 门槛 20/26 · 12/14 · >0.5，`run_acceptance.py --quick` |
 | 板上延迟 | **max 142.7 ms/tok** | 三句串口实测（均 132.8），门槛 250 ms/token |
 | 言语行为（规则层） | **12 / 12** | 威胁 / 第三方比较，全部不经过模型 |
 | 自比问句放行 | **4 / 4** | 「你打得过灵梦吗」必须交给模型，且答对 |
@@ -37,7 +38,8 @@ MoE Transformer，字符级中文词表 **1850** 字，人设是《东方 Projec
 | 量化 | 权重 ternary 1.58 · tok_emb int8 · router int8 · scale fp16 |
 | 参数量 | 2.17 M（5 层 × 32 专家，打包后 1163 KB） |
 
-> 当前部署 checkpoint：`model/_stance_mt12.pt.best`（多轮补集 warm start，多轮承接 22/26）；`model_stance26.pt.best` 是它的起点，保留作对照。
+> 当前部署 checkpoint：`model/_stance_fix4.pt`（从 `_stance_mt12` 热启动 300 步，主集 + 多轮 10% + 硬例子包 12%，
+> 见 `docs/project_state.md` 20.45）；`_stance_mt12` 是它的起点，保留作对照。
 
 ## 3. 核心设计：三层分工
 
@@ -98,8 +100,13 @@ ESPGPT_CHAT_WEIGHT=10 ESPGPT_WARMUP_ITERS=50 ESPGPT_T_MAX=1500 \
 ESPGPT_BATCH_SIZE=128 ESPGPT_PATIENCE=999 \
 python main.py --train
 
+# 1b) 硬例子包：把 203 集里反复被别的概念抢走的问法按 12% 的步数占比再喂一遍
+#     （四轮阶梯见 docs/project_state.md 20.45；--round 4 复现当前部署那一版）
+python build_hard_pack.py --round 4 --out E:/espllm_data/persona_corpus/fix_r4.txt
+# ESPGPT_EXTRA="<多轮集>:0.10,E:/espllm_data/persona_corpus/fix_r4.txt:0.12"
+
 # 2) 导出权重头文件（必须带字符词表，否则写进去的是英文 BPE 表，板上只吐英文碎片）
-ESPGPT_CHAR_VOCAB=persona/vocab_zh.json python convert_model_to_c.py _stance_mt12
+ESPGPT_CHAR_VOCAB=persona/vocab_zh.json python convert_model_to_c.py _stance_fix4
 
 # 3) 静态检查与回归
 python check_arch_sync.py      # 头文件常量 == checkpoint 架构
@@ -112,7 +119,7 @@ pio run -e esp8266 -t upload
 
 # 5) 板上验收（需先说 COM 口号）
 python probe_board_acceptance.py COM5
-python per_concept.py --ckpt model/_stance_mt12.pt.best
+python per_concept.py --ckpt model/_stance_fix4.pt
 ```
 
 ### 训练配方的四个环境变量

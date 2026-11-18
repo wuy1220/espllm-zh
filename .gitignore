@@ -5,6 +5,9 @@ compile_commands.json
 .registry_platform.json
 *.bin
 
+# 转换出来的头文件副本 / 回滚用的旧头文件，都不进仓库
+build/
+
 # ── Python ──────────────────────────────────────────────────
 __pycache__/
 *.pyc

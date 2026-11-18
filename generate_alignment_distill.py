@@ -69,6 +69,25 @@ def load_existing(paths):
     return seen_questions, seen_answers
 
 
+_SESSION = None
+
+
+def _session():
+    """Keep one TLS tunnel alive across calls.
+
+    The sandbox egress proxy refuses CONNECT for non-allowlisted hosts most of
+    the time (measured: 1 success in 8 with a fresh connection each time), so a
+    per-request urllib call is a lottery that costs ~10 s per loss. Reusing one
+    session makes the tunnel a one-off setup: once it succeeds, every later
+    request rides the same pooled connection.
+    """
+    global _SESSION
+    if _SESSION is None:
+        import requests
+        _SESSION = requests.Session()
+    return _SESSION
+
+
 def api_request(prompt, base, key, model, timeout):
     payload = {
         "model": model,
@@ -78,25 +97,39 @@ def api_request(prompt, base, key, model, timeout):
         # a retired model is not an option.
         "temperature": float(os.environ.get("QN_TEMPERATURE", "0.9")),
         "max_tokens": int(os.environ.get("QN_MAX_TOKENS", "3000")),
-        "reasoning_effort": os.environ.get("QN_REASONING", "low"),
     }
-    req = urllib.request.Request(
-        base.rstrip("/") + "/chat/completions",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
-        method="POST",
-    )
+    # Empty QN_REASONING drops the field: relays that only proxy OpenAI's
+    # surface reject unknown keys with a 400.
+    reasoning = os.environ.get("QN_REASONING", "low")
+    if reasoning:
+        payload["reasoning_effort"] = reasoning
+    url = base.rstrip("/") + "/chat/completions"
+    headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json"}
     started = time.time()
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            result = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", "replace")
+    tries = int(os.environ.get("QN_TUNNEL_RETRIES", "60"))
+    result, failure = None, "no attempt"
+    for _try in range(tries):
+        try:
+            response = _session().post(url, json=payload, headers=headers, timeout=timeout)
+        except Exception as exc:  # ProxyError / ConnectionError / ReadTimeout
+            failure = f"{type(exc).__name__}: {exc}"
+            time.sleep(1.5)
+            continue
+        if response.status_code == 200:
+            result = response.json()
+            break
+        body = response.text
         try:
             detail = json.loads(body).get("error", {}).get("message", "request rejected")
         except json.JSONDecodeError:
             detail = "request rejected"
-        raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
+        if response.status_code in (429, 500, 502, 503, 504):
+            failure = f"HTTP {response.status_code}: {detail}"
+            time.sleep(3)
+            continue
+        raise RuntimeError(f"HTTP {response.status_code}: {detail}")
+    if result is None:
+        raise RuntimeError(f"request failed after {tries} tries: {failure}")
     choice = result["choices"][0]
     message = choice.get("message") or {}
     text = message.get("content") or ""
