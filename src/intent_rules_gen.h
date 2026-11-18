@@ -92,6 +92,27 @@ static const char* pick_flash(const char* const* arr, size_t n) {
         kZhMetaKw_00, kZhMetaKw_01, kZhMetaKw_02, kZhMetaKw_03, kZhMetaKw_04, kZhMetaKw_05,
         kZhMetaKw_06, kZhMetaKw_07, kZhMetaKw_08,
     };
+    static const char kZhOodKwNo_00[] PROGMEM = "难过";
+    static const char kZhOodKwNo_01[] PROGMEM = "伤心";
+    static const char kZhOodKwNo_02[] PROGMEM = "想哭";
+    static const char kZhOodKwNo_03[] PROGMEM = "哭了";
+    static const char kZhOodKwNo_04[] PROGMEM = "好累";
+    static const char kZhOodKwNo_05[] PROGMEM = "加班";
+    static const char kZhOodKwNo_06[] PROGMEM = "郁闷";
+    static const char kZhOodKwNo_07[] PROGMEM = "不开心";
+    static const char kZhOodKwNo_08[] PROGMEM = "压力";
+    static const char kZhOodKwNo_09[] PROGMEM = "失眠";
+    static const char kZhOodKwNo_10[] PROGMEM = "烦死";
+    static const char kZhOodKwNo_11[] PROGMEM = "委屈";
+    static const char kZhOodKwNo_12[] PROGMEM = "好烦";
+    static const char kZhOodKwNo_13[] PROGMEM = "被骂";
+    static const char kZhOodKwNo_14[] PROGMEM = "骂了";
+    static const char kZhOodKwNo_15[] PROGMEM = "烦透";
+    static const char* const kZhOodKwNo[] PROGMEM = {
+        kZhOodKwNo_00, kZhOodKwNo_01, kZhOodKwNo_02, kZhOodKwNo_03, kZhOodKwNo_04, kZhOodKwNo_05,
+        kZhOodKwNo_06, kZhOodKwNo_07, kZhOodKwNo_08, kZhOodKwNo_09, kZhOodKwNo_10, kZhOodKwNo_11,
+        kZhOodKwNo_12, kZhOodKwNo_13, kZhOodKwNo_14, kZhOodKwNo_15,
+    };
     static const char kZhOodKw_00[] PROGMEM = "天平";
     static const char kZhOodKw_01[] PROGMEM = "剪镜毯";
     static const char kZhOodKw_02[] PROGMEM = "冰淇淋";
@@ -100,9 +121,180 @@ static const char* pick_flash(const char* const* arr, size_t n) {
     static const char kZhOodKw_05[] PROGMEM = "火箭";
     static const char kZhOodKw_06[] PROGMEM = "邮票";
     static const char kZhOodKw_07[] PROGMEM = "比特币";
+    static const char kZhOodKw_08[] PROGMEM = "网络";
+    static const char kZhOodKw_09[] PROGMEM = "网站";
+    static const char kZhOodKw_10[] PROGMEM = "视频";
+    static const char kZhOodKw_11[] PROGMEM = "代码";
+    static const char kZhOodKw_12[] PROGMEM = "软件";
+    static const char kZhOodKw_13[] PROGMEM = "硬件";
+    static const char kZhOodKw_14[] PROGMEM = "芯片";
+    static const char kZhOodKw_15[] PROGMEM = "屏幕";
+    static const char kZhOodKw_16[] PROGMEM = "电池";
+    static const char kZhOodKw_17[] PROGMEM = "相机";
+    static const char kZhOodKw_18[] PROGMEM = "耳机";
+    static const char kZhOodKw_19[] PROGMEM = "键盘";
+    static const char kZhOodKw_20[] PROGMEM = "鼠标";
+    static const char kZhOodKw_21[] PROGMEM = "打印机";
+    static const char kZhOodKw_22[] PROGMEM = "密码";
+    static const char kZhOodKw_23[] PROGMEM = "账号";
+    static const char kZhOodKw_24[] PROGMEM = "邮箱";
+    static const char kZhOodKw_25[] PROGMEM = "短信";
+    static const char kZhOodKw_26[] PROGMEM = "钱";
+    static const char kZhOodKw_27[] PROGMEM = "股票";
+    static const char kZhOodKw_28[] PROGMEM = "基金";
+    static const char kZhOodKw_29[] PROGMEM = "保险";
+    static const char kZhOodKw_30[] PROGMEM = "银行";
+    static const char kZhOodKw_31[] PROGMEM = "贷款";
+    static const char kZhOodKw_32[] PROGMEM = "房价";
+    static const char kZhOodKw_33[] PROGMEM = "税";
+    static const char kZhOodKw_34[] PROGMEM = "发票";
+    static const char kZhOodKw_35[] PROGMEM = "红包";
+    static const char kZhOodKw_36[] PROGMEM = "付款";
+    static const char kZhOodKw_37[] PROGMEM = "支付";
+    static const char kZhOodKw_38[] PROGMEM = "学校";
+    static const char kZhOodKw_39[] PROGMEM = "老师";
+    static const char kZhOodKw_40[] PROGMEM = "同学";
+    static const char kZhOodKw_41[] PROGMEM = "考试";
+    static const char kZhOodKw_42[] PROGMEM = "大学";
+    static const char kZhOodKw_43[] PROGMEM = "专业";
+    static const char kZhOodKw_44[] PROGMEM = "毕业";
+    static const char kZhOodKw_45[] PROGMEM = "公司";
+    static const char kZhOodKw_46[] PROGMEM = "会议";
+    static const char kZhOodKw_47[] PROGMEM = "简历";
+    static const char kZhOodKw_48[] PROGMEM = "面试";
+    static const char kZhOodKw_49[] PROGMEM = "合同";
+    static const char kZhOodKw_50[] PROGMEM = "法律";
+    static const char kZhOodKw_51[] PROGMEM = "律师";
+    static const char kZhOodKw_52[] PROGMEM = "警察";
+    static const char kZhOodKw_53[] PROGMEM = "政府";
+    static const char kZhOodKw_54[] PROGMEM = "新闻";
+    static const char kZhOodKw_55[] PROGMEM = "报纸";
+    static const char kZhOodKw_56[] PROGMEM = "电视";
+    static const char kZhOodKw_57[] PROGMEM = "电影";
+    static const char kZhOodKw_58[] PROGMEM = "音乐";
+    static const char kZhOodKw_59[] PROGMEM = "歌曲";
+    static const char kZhOodKw_60[] PROGMEM = "歌";
+    static const char kZhOodKw_61[] PROGMEM = "明星";
+    static const char kZhOodKw_62[] PROGMEM = "足球";
+    static const char kZhOodKw_63[] PROGMEM = "篮球";
+    static const char kZhOodKw_64[] PROGMEM = "奥运";
+    static const char kZhOodKw_65[] PROGMEM = "冠军";
+    static const char kZhOodKw_66[] PROGMEM = "金牌";
+    static const char kZhOodKw_67[] PROGMEM = "世界杯";
+    static const char kZhOodKw_68[] PROGMEM = "北京";
+    static const char kZhOodKw_69[] PROGMEM = "上海";
+    static const char kZhOodKw_70[] PROGMEM = "广州";
+    static const char kZhOodKw_71[] PROGMEM = "深圳";
+    static const char kZhOodKw_72[] PROGMEM = "中国";
+    static const char kZhOodKw_73[] PROGMEM = "美国";
+    static const char kZhOodKw_74[] PROGMEM = "日本";
+    static const char kZhOodKw_75[] PROGMEM = "欧洲";
+    static const char kZhOodKw_76[] PROGMEM = "地球";
+    static const char kZhOodKw_77[] PROGMEM = "月亮";
+    static const char kZhOodKw_78[] PROGMEM = "宇宙";
+    static const char kZhOodKw_79[] PROGMEM = "火星";
+    static const char kZhOodKw_80[] PROGMEM = "历史";
+    static const char kZhOodKw_81[] PROGMEM = "科学";
+    static const char kZhOodKw_82[] PROGMEM = "数学";
+    static const char kZhOodKw_83[] PROGMEM = "物理";
+    static const char kZhOodKw_84[] PROGMEM = "化学";
+    static const char kZhOodKw_85[] PROGMEM = "生物";
+    static const char kZhOodKw_86[] PROGMEM = "英语";
+    static const char kZhOodKw_87[] PROGMEM = "单词";
+    static const char kZhOodKw_88[] PROGMEM = "语法";
+    static const char kZhOodKw_89[] PROGMEM = "哲学";
+    static const char kZhOodKw_90[] PROGMEM = "经济";
+    static const char kZhOodKw_91[] PROGMEM = "政治";
+    static const char kZhOodKw_92[] PROGMEM = "鞋子";
+    static const char kZhOodKw_93[] PROGMEM = "帽子";
+    static const char kZhOodKw_94[] PROGMEM = "眼镜";
+    static const char kZhOodKw_95[] PROGMEM = "钥匙";
+    static const char kZhOodKw_96[] PROGMEM = "钱包";
+    static const char kZhOodKw_97[] PROGMEM = "快递";
+    static const char kZhOodKw_98[] PROGMEM = "外卖";
+    static const char kZhOodKw_99[] PROGMEM = "超市";
+    static const char kZhOodKw_100[] PROGMEM = "商场";
+    static const char kZhOodKw_101[] PROGMEM = "米饭";
+    static const char kZhOodKw_102[] PROGMEM = "面条";
+    static const char kZhOodKw_103[] PROGMEM = "面包";
+    static const char kZhOodKw_104[] PROGMEM = "咖啡";
+    static const char kZhOodKw_105[] PROGMEM = "可乐";
+    static const char kZhOodKw_106[] PROGMEM = "啤酒";
+    static const char kZhOodKw_107[] PROGMEM = "病毒";
+    static const char kZhOodKw_108[] PROGMEM = "细菌";
+    static const char kZhOodKw_109[] PROGMEM = "原子";
+    static const char kZhOodKw_110[] PROGMEM = "分子";
+    static const char kZhOodKw_111[] PROGMEM = "引力";
+    static const char kZhOodKw_112[] PROGMEM = "电流";
+    static const char kZhOodKw_113[] PROGMEM = "地铁";
+    static const char kZhOodKw_114[] PROGMEM = "公交";
+    static const char kZhOodKw_115[] PROGMEM = "火车";
+    static const char kZhOodKw_116[] PROGMEM = "飞机";
+    static const char kZhOodKw_117[] PROGMEM = "签证";
+    static const char kZhOodKw_118[] PROGMEM = "护照";
+    static const char kZhOodKw_119[] PROGMEM = "机票";
+    static const char kZhOodKw_120[] PROGMEM = "酒店";
+    static const char kZhOodKw_121[] PROGMEM = "旅游";
+    static const char kZhOodKw_122[] PROGMEM = "景点";
+    static const char kZhOodKw_123[] PROGMEM = "门票";
+    static const char kZhOodKw_124[] PROGMEM = "减肥";
+    static const char kZhOodKw_125[] PROGMEM = "健身";
+    static const char kZhOodKw_126[] PROGMEM = "跑步";
+    static const char kZhOodKw_127[] PROGMEM = "小说";
+    static const char kZhOodKw_128[] PROGMEM = "漫画";
+    static const char kZhOodKw_129[] PROGMEM = "诗歌";
+    static const char kZhOodKw_130[] PROGMEM = "论文";
+    static const char kZhOodKw_131[] PROGMEM = "数据";
+    static const char kZhOodKw_132[] PROGMEM = "算法";
+    static const char kZhOodKw_133[] PROGMEM = "系统";
+    static const char kZhOodKw_134[] PROGMEM = "服务器";
+    static const char kZhOodKw_135[] PROGMEM = "蓝牙";
+    static const char kZhOodKw_136[] PROGMEM = "空调";
+    static const char kZhOodKw_137[] PROGMEM = "插座";
+    static const char kZhOodKw_138[] PROGMEM = "洗衣机";
+    static const char kZhOodKw_139[] PROGMEM = "充电器";
+    static const char kZhOodKw_140[] PROGMEM = "冰箱";
+    static const char kZhOodKw_141[] PROGMEM = "微波炉";
+    static const char kZhOodKw_142[] PROGMEM = "几号";
+    static const char kZhOodKw_143[] PROGMEM = "星期";
+    static const char kZhOodKw_144[] PROGMEM = "几月";
+    static const char kZhOodKw_145[] PROGMEM = "红烧";
+    static const char kZhOodKw_146[] PROGMEM = "螺蛳粉";
+    static const char kZhOodKw_147[] PROGMEM = "量子";
+    static const char kZhOodKw_148[] PROGMEM = "相对论";
+    static const char kZhOodKw_149[] PROGMEM = "进化";
+    static const char kZhOodKw_150[] PROGMEM = "基因";
+    static const char kZhOodKw_151[] PROGMEM = "太空";
+    static const char kZhOodKw_152[] PROGMEM = "卫星";
+    static const char kZhOodKw_153[] PROGMEM = "导弹";
+    static const char kZhOodKw_154[] PROGMEM = "核弹";
     static const char* const kZhOodKw[] PROGMEM = {
         kZhOodKw_00, kZhOodKw_01, kZhOodKw_02, kZhOodKw_03, kZhOodKw_04, kZhOodKw_05,
-        kZhOodKw_06, kZhOodKw_07,
+        kZhOodKw_06, kZhOodKw_07, kZhOodKw_08, kZhOodKw_09, kZhOodKw_10, kZhOodKw_11,
+        kZhOodKw_12, kZhOodKw_13, kZhOodKw_14, kZhOodKw_15, kZhOodKw_16, kZhOodKw_17,
+        kZhOodKw_18, kZhOodKw_19, kZhOodKw_20, kZhOodKw_21, kZhOodKw_22, kZhOodKw_23,
+        kZhOodKw_24, kZhOodKw_25, kZhOodKw_26, kZhOodKw_27, kZhOodKw_28, kZhOodKw_29,
+        kZhOodKw_30, kZhOodKw_31, kZhOodKw_32, kZhOodKw_33, kZhOodKw_34, kZhOodKw_35,
+        kZhOodKw_36, kZhOodKw_37, kZhOodKw_38, kZhOodKw_39, kZhOodKw_40, kZhOodKw_41,
+        kZhOodKw_42, kZhOodKw_43, kZhOodKw_44, kZhOodKw_45, kZhOodKw_46, kZhOodKw_47,
+        kZhOodKw_48, kZhOodKw_49, kZhOodKw_50, kZhOodKw_51, kZhOodKw_52, kZhOodKw_53,
+        kZhOodKw_54, kZhOodKw_55, kZhOodKw_56, kZhOodKw_57, kZhOodKw_58, kZhOodKw_59,
+        kZhOodKw_60, kZhOodKw_61, kZhOodKw_62, kZhOodKw_63, kZhOodKw_64, kZhOodKw_65,
+        kZhOodKw_66, kZhOodKw_67, kZhOodKw_68, kZhOodKw_69, kZhOodKw_70, kZhOodKw_71,
+        kZhOodKw_72, kZhOodKw_73, kZhOodKw_74, kZhOodKw_75, kZhOodKw_76, kZhOodKw_77,
+        kZhOodKw_78, kZhOodKw_79, kZhOodKw_80, kZhOodKw_81, kZhOodKw_82, kZhOodKw_83,
+        kZhOodKw_84, kZhOodKw_85, kZhOodKw_86, kZhOodKw_87, kZhOodKw_88, kZhOodKw_89,
+        kZhOodKw_90, kZhOodKw_91, kZhOodKw_92, kZhOodKw_93, kZhOodKw_94, kZhOodKw_95,
+        kZhOodKw_96, kZhOodKw_97, kZhOodKw_98, kZhOodKw_99, kZhOodKw_100, kZhOodKw_101,
+        kZhOodKw_102, kZhOodKw_103, kZhOodKw_104, kZhOodKw_105, kZhOodKw_106, kZhOodKw_107,
+        kZhOodKw_108, kZhOodKw_109, kZhOodKw_110, kZhOodKw_111, kZhOodKw_112, kZhOodKw_113,
+        kZhOodKw_114, kZhOodKw_115, kZhOodKw_116, kZhOodKw_117, kZhOodKw_118, kZhOodKw_119,
+        kZhOodKw_120, kZhOodKw_121, kZhOodKw_122, kZhOodKw_123, kZhOodKw_124, kZhOodKw_125,
+        kZhOodKw_126, kZhOodKw_127, kZhOodKw_128, kZhOodKw_129, kZhOodKw_130, kZhOodKw_131,
+        kZhOodKw_132, kZhOodKw_133, kZhOodKw_134, kZhOodKw_135, kZhOodKw_136, kZhOodKw_137,
+        kZhOodKw_138, kZhOodKw_139, kZhOodKw_140, kZhOodKw_141, kZhOodKw_142, kZhOodKw_143,
+        kZhOodKw_144, kZhOodKw_145, kZhOodKw_146, kZhOodKw_147, kZhOodKw_148, kZhOodKw_149,
+        kZhOodKw_150, kZhOodKw_151, kZhOodKw_152, kZhOodKw_153, kZhOodKw_154,
     };
     static const char kZhAffectionKwNo_00[] PROGMEM = "什么";
     static const char* const kZhAffectionKwNo[] PROGMEM = {
@@ -802,8 +994,8 @@ static const char* match_intent_rules(const char* norm) {
         g_intent_label = "zh_meta";
         return pick_flash(kZhMetaRep, 4);
     }
-    // zh_ood (1 phrases, 4 replies)
-    if (matches_any(norm, kZhOodKw, sizeof(kZhOodKw) / sizeof(char*))) {
+    // zh_ood (1 phrases, 4 replies, unless:难过/伤心/想哭/哭了/好累/加班/郁闷/不开心/压力/失眠/烦死/委屈/好烦/被骂/骂了/烦透)
+    if (!matches_any(norm, kZhOodKwNo, sizeof(kZhOodKwNo) / sizeof(char*)) && (matches_any(norm, kZhOodKw, sizeof(kZhOodKw) / sizeof(char*)))) {
         g_intent_label = "zh_ood";
         return pick_flash(kZhOodRep, 4);
     }

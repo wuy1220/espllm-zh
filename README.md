@@ -20,7 +20,8 @@ MoE Transformer，字符级中文词表 **1850** 字，人设是《东方 Projec
 | 板上延迟 | **max 142.7 ms/tok** | 三句串口实测（均 132.8），门槛 250 ms/token |
 | 言语行为（规则层） | **12 / 12** | 威胁 / 第三方比较，全部不经过模型 |
 | 自比问句放行 | **4 / 4** | 「你打得过灵梦吗」必须交给模型，且答对 |
-| 规则覆盖回归 | **63 / 63** | `coverage_zh_rules.py`（含 `zh_ood` 8 个域外词） |
+| 规则覆盖回归 | **68 / 68** | `coverage_zh_rules.py`（含 `zh_ood` 155 个域外词） |
+| 未知话题回避 | **22 / 25** | `check_ood_nouns.py`：知识型域外问题的硬回避率；改判 0、冷漠 0 |
 | 训练集 / 验证集 loss | 1.8757 / 3.0334 | stance26 那一轮：7,019 窗，1,400 步，约 15 分钟（8 线程 CPU） |
 
 > 判行为只认**逐概念探针**。本项目里 val loss 相近而行为天差地别的例子出现过两次
@@ -69,7 +70,8 @@ main.py                 PyTorch 训练（训练时即 QAT）
 convert_model_to_c.py   导出 C++ 权重头文件（ternary 位打包 + int8 词表）
 check_arch_sync.py      构建闸门：头文件常量 vs 自报架构，不一致拒绝构建（extra_scripts.py 在编译前调它）
 intent_rules.py         意图规则唯一入口 → gen_rules_cpp.py 生成 C++
-coverage_zh_rules.py    规则覆盖回归（63 条）
+coverage_zh_rules.py    规则覆盖回归（68 条）
+check_ood_nouns.py      域外词表闸门（改判 0 / 冷漠 0 / 硬回避 ≥20）
 check_lexicon.py        词典三条硬约束：答案不以概念名开头 / 跨概念开头 2 字唯一 / 字表内
 gen_long.py             长文本/滑窗推理入口，所有探针都 import 它（必须在顶层）
 probe_stance.py         模型侧概念探针（seen / unseen / 陌生词 / KL）
@@ -112,7 +114,8 @@ ESPGPT_CHAR_VOCAB=persona/vocab_zh.json python convert_model_to_c.py _stance_fix
 python check_arch_sync.py      # 头文件常量 == checkpoint 架构
 python test_newline_token.py   # 两种词表的换行 token id 都能终止生成
 python check_lexicon.py        # 词典约束
-python coverage_zh_rules.py    # 规则覆盖 63/63
+python coverage_zh_rules.py    # 规则覆盖 68/68
+python check_ood_nouns.py      # 域外词表：22/25 硬回避，0 改判，0 冷漠
 
 # 4) 编译烧录
 pio run -e esp8266 -t upload

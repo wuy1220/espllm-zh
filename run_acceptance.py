@@ -88,6 +88,17 @@ def pc_checks(ckpt, quick, show, rows, logs):
                  "PASS" if ok else "FAIL",
                  "" if ok else out.strip().splitlines()[-1][:80]))
 
+    # 域外名词表闸门：纯文本，不过模型，秒级。它守的是三件事 ——
+    # 新增词不许改判任何已有覆盖用例（改判 0）、不许把第一人称处境判成「不认识」
+    # （冷漠 0）、知识型未知话题的硬回避率不低于 GATE_HARD。
+    rc, out, _ = run([PY, "-u", "check_ood_nouns.py", "--check"])
+    logs["ood_nouns"] = out
+    hard, hard_tot = frac(r"硬回避 (\d+)/(\d+)", out)
+    ok = (rc == 0) and ("PASS" in out)
+    rows.append(("未知话题回避", ("%d/%d" % (hard, hard_tot)) if hard is not None else "解析失败",
+                 "改判0/冷漠0", "PASS" if ok else "FAIL",
+                 "" if ok else out.strip()[:90]))
+
     rc, out, _ = run([PY, "-u", "probe_stance.py", "--ckpt", ckpt,
                       "--set", "unseen", "--n", "1", "--show", str(show)])
     logs["unseen"] = out
@@ -182,7 +193,9 @@ def board_checks(port, rows, logs):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ckpt", default="model/_stance_mt12.pt.best")
+    ap.add_argument("--ckpt", default="model/_stance_fix4.pt",
+                    help="默认 = 当前部署模型（20.45 的 r4）。改部署记得同步这里，"
+                         "否则验收会安静地测一个旧模型。")
     ap.add_argument("--quick", action="store_true", help="跳过 203 集（省 2 分钟）")
     ap.add_argument("--board", default="", help="串口号，如 COM5；给了才跑板端")
     ap.add_argument("--board-only", action="store_true", help="只跑板端（需 --board）")
