@@ -3,7 +3,7 @@
 一块 **4 MB Flash / 80 KB DRAM** 的 ESP8266（NodeMCU，80 MHz 单核），跑一个 **2.17 M 参数**的
 MoE Transformer，字符级中文词表 **1850** 字，人设是《东方 Project》的琪露诺。
 权重全部塞进 Flash：ternary 1.58-bit（5 个三进制权重/字节）+ int8 词表 + int8 router，
-量化后 **1163 KB**，固件占 Flash 94.3%、DRAM 92.3%。
+量化后 **1163 KB**，固件占 Flash 94.4%（986,355 / 1,044,464 B）、DRAM 92.4%（75,680 / 81,920 B）。
 
 没有操作系统、没有 PSRAM、没有堆分配 —— 一个裸机 C++ 推理引擎加一层规则表，
 就是全部。
@@ -14,12 +14,12 @@ MoE Transformer，字符级中文词表 **1850** 字，人设是《东方 Projec
 
 | 指标 | 数值 | 口径 |
 |---|---|---|
-| 逐概念命中率 | **191 / 203 = 94%** | 26 概念 × 混合问法，PC 侧 fp32 贪心解码 |
-| 板上日常三概念 | **61 / 66 = 92%** | 吃饭 17/22 · 睡觉 22/22 · 玩耍 22/22，`:greedy` 关规则 |
+| 逐概念命中率 | **198 / 203 = 98%** | 部署模型 `_stance_mt12`，26 概念 × 混合问法，PC 侧 fp32 贪心 |
+| 日常三概念 | **64 / 66 = 97%** | 吃饭 21/22 · 睡觉 22/22 · 玩耍 21/22，PC 侧 `:greedy`；板上上次测 61/66 |
 | 言语行为（规则层） | **12 / 12** | 威胁 / 第三方比较，全部不经过模型 |
 | 自比问句放行 | **4 / 4** | 「你打得过灵梦吗」必须交给模型，且答对 |
-| 规则覆盖回归 | **60 / 60** | `coverage_zh_rules.py` |
-| 训练集 / 验证集 loss | 1.8757 / 3.0334 | 7,019 窗，1,400 步，约 15 分钟（8 线程 CPU） |
+| 规则覆盖回归 | **63 / 63** | `coverage_zh_rules.py`（含 `zh_ood` 8 个域外词） |
+| 训练集 / 验证集 loss | 1.8757 / 3.0334 | stance26 那一轮：7,019 窗，1,400 步，约 15 分钟（8 线程 CPU） |
 
 > 判行为只认**逐概念探针**。本项目里 val loss 相近而行为天差地别的例子出现过两次
 > （val 2.96 → 73%，val 3.03 → 94%），见 `docs/project_state.md`。
@@ -31,10 +31,12 @@ MoE Transformer，字符级中文词表 **1850** 字，人设是《东方 Projec
 | 层数 / 专家数 | 5 层 / 每层 32 专家（Top-1 硬路由） |
 | 隐藏维 / 头数 | 64 / 2（KV 头 1，MQA） |
 | MoE 隐层 | 64（SwiGLU） |
-| 训练窗 / 板上窗 | 128 / 64（滑动窗口，`slot` 与 `pos` 解耦） |
+| 训练窗 / 板上窗 | 128 / 104（滑动窗口，`slot` 与 `pos` 解耦；历史模式另留 20 token 回复预算） |
 | 词表 | 1850，字符级（ASCII 仅 27 个） |
 | 量化 | 权重 ternary 1.58 · tok_emb int8 · router int8 · scale fp16 |
 | 参数量 | 2.17 M（5 层 × 32 专家，打包后 1163 KB） |
+
+> 当前部署 checkpoint：`model/_stance_mt12.pt.best`（多轮补集 warm start，多轮承接 22/26）；`model_stance26.pt.best` 是它的起点，保留作对照。
 
 ## 3. 核心设计：三层分工
 
@@ -64,11 +66,16 @@ main.py                 PyTorch 训练（训练时即 QAT）
 convert_model_to_c.py   导出 C++ 权重头文件（ternary 位打包 + int8 词表）
 check_arch_sync.py      构建闸门：头文件常量 vs 自报架构，不一致拒绝构建（extra_scripts.py 在编译前调它）
 intent_rules.py         意图规则唯一入口 → gen_rules_cpp.py 生成 C++
-coverage_zh_rules.py    规则覆盖回归（60 条）
+coverage_zh_rules.py    规则覆盖回归（63 条）
 check_lexicon.py        词典三条硬约束：答案不以概念名开头 / 跨概念开头 2 字唯一 / 字表内
-probe_stance.py         模型侧概念探针（seen / unseen 分开报）
-per_concept.py          逐概念命中率（203 条）
+gen_long.py             长文本/滑窗推理入口，所有探针都 import 它（必须在顶层）
+probe_stance.py         模型侧概念探针（seen / unseen / 陌生词 / KL）
+probe_react.py          「抄名词」时代的反应式探针，留作历史对照
+probe_zh_kl.py          输入敏感性 KL 专项
+per_concept.py          逐概念命中率（203 条）+ 日常三概念
+board_zh_test.py        串口对话基建（按 bytes 累积解码，不能按块 decode）
 board_stance4.py        板上概念探针
+run_acceptance.py       一命令验收：架构 / 未见 / OOD / KL / 203 集 / 板端延迟
 probe_board_acceptance.py  板上验收三段：日常概念 / 言语行为 / 自比放行
 gen_*_corpus.py         语料工厂（反应语料 / 表态语料 / 人设语料）
 docs/                   设计文档与实验记录（project_state.md 是完整实验日志）
@@ -81,6 +88,9 @@ logs/ archive/          本地归档，已 gitignore
 ## 5. 跑起来
 
 ```bash
+# 0) 一命令验收（架构 + 未见问法 + 陌生词 + KL + 203 集；板子插上再加 --board COM5）
+python run_acceptance.py
+
 # 1) 训练（四个环境变量少一个就废模型，见下表）
 export ESPGPT_CHAR_VOCAB=persona/vocab_zh.json
 ESPGPT_CHAT_WEIGHT=10 ESPGPT_WARMUP_ITERS=50 ESPGPT_T_MAX=1500 \
@@ -88,20 +98,20 @@ ESPGPT_BATCH_SIZE=128 ESPGPT_PATIENCE=999 \
 python main.py --train
 
 # 2) 导出权重头文件（必须带字符词表，否则写进去的是英文 BPE 表，板上只吐英文碎片）
-ESPGPT_CHAR_VOCAB=persona/vocab_zh.json python convert_model_to_c.py stance26
+ESPGPT_CHAR_VOCAB=persona/vocab_zh.json python convert_model_to_c.py _stance_mt12
 
 # 3) 静态检查与回归
 python check_arch_sync.py      # 头文件常量 == checkpoint 架构
 python test_newline_token.py   # 两种词表的换行 token id 都能终止生成
 python check_lexicon.py        # 词典约束
-python coverage_zh_rules.py    # 规则覆盖 60/60
+python coverage_zh_rules.py    # 规则覆盖 63/63
 
 # 4) 编译烧录
 pio run -e esp8266 -t upload
 
 # 5) 板上验收（需先说 COM 口号）
 python probe_board_acceptance.py COM5
-python per_concept.py --ckpt model/model_stance26.pt
+python per_concept.py --ckpt model/_stance_mt12.pt.best
 ```
 
 ### 训练配方的四个环境变量
@@ -124,7 +134,7 @@ python per_concept.py --ckpt model/model_stance26.pt
 - **防背稿不能管贪心**：一个概念只有 4 条表态，`:greedy` 连问必然复读；检测只在
   `temp > 0` 时启用，否则重掷＝同一句，二次撞环后整段转回避。
 - **QK 提精度是唯一可能的突破**（q/k 抬到 int8/4bit，约 +16 KB），工程量太大，暂缓。
-- 上下文 64 token，靠滑窗支撑多轮；真成本是注意力扫满窗，不是滑窗本身。
+- 上下文 104 token，靠滑窗支撑多轮，历史模式只保留最近一轮；真成本是注意力扫满窗，不是滑窗本身。
 
 ## 7. 文档
 
@@ -133,6 +143,7 @@ python per_concept.py --ckpt model/model_stance26.pt
 | [docs/project_state.md](docs/project_state.md) | 完整实验日志：每个数字怎么来的、哪些路已否决 |
 | [docs/ENGINE_SPEC.md](docs/ENGINE_SPEC.md) | 上游引擎规格书（内存布局、量化、看门狗切片） |
 | [persona/model_first_plan.md](persona/model_first_plan.md) | 人设方案与三层分工定稿（第 13 节） |
+| `run_acceptance.py` | 固定验收集的一键实现（`project_state.md` 20.2 那五条命令的封装） |
 | [docs/research_2026-10.md](docs/research_2026-10.md) | 文献侧调研：小模型量化、induction head、语料可行性 |
 | [docs/arch_scaling_and_flash.md](docs/arch_scaling_and_flash.md) | 架构预算：为什么同参数给深度不给专家 |
 | [docs/micro_models_and_speed.md](docs/micro_models_and_speed.md) | 微模型与速度实测 |
