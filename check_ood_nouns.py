@@ -128,6 +128,21 @@ def other_rule_keywords():
     return out
 
 
+def embedded_concept_nouns(words):
+    """域外词里**包含**概念名词的那些（提示，不是拒绝）。
+
+    例：`冰箱` / `冰淇淋` 含「冰」。这种词会把「冰屋里有冰箱吗」判成域外，虽然
+    「你的冰屋里有啥」仍然正常。影响面很小，但必须**可见** —— 换词表时一眼能看到
+    自己新加了几个这种词。`冰淇淋` 从 2026-10 起就在表里，是既存行为不是回归。
+    """
+    out = []
+    for w in words:
+        hit = [n for n in I.CONCEPT_NOUNS if n in w and n != w]
+        if hit:
+            out.append((w, hit))
+    return out
+
+
 def check(words):
     nouns = set(I.CONCEPT_NOUNS)
     qs = known_questions()
@@ -287,6 +302,12 @@ def main():
     print("候选 %d -> 通过 %d，拒绝 %d" % (len(CANDIDATES), len(uniq), len(rejected)))
     for w, why in rejected:
         print("  拒 %-8s %s" % (w, " | ".join(why[:2])))
+    emb = embedded_concept_nouns(uniq)
+    if emb:
+        print("  提示：%d 个词内含概念名词（会把带该概念的问句判成域外，影响面小）"
+              % len(emb))
+        for w, hit in emb:
+            print("     %-6s 含 %s" % (w, "/".join(hit)))
     if a.emit:
         print("\n--- 通过 ---")
         for i in range(0, len(uniq), 9):
