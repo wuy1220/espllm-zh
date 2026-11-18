@@ -798,7 +798,74 @@ def _sample_train_idx():
     return random.choice(_sample_pools[k][0])
 
 
+# ── Optional: standalone preference-pair pool, sampled by *step* ─────────────
+# ESPGPT_PREF_DATASET above must be aligned 1:1 with the main corpus, so a small
+# pair set cannot be mixed into a large one through it. This path draws whole
+# steps from a standalone pair corpus instead: with probability
+# ESPGPT_PREF_SHARE a training step is built from the pair set (preferred answer
+# as the SFT target, counterfactual as the preference negative). That is how
+# "8% of windows come from the pair set" is implemented without duplicating the
+# 4.8k-window main corpus, and it keeps the val split untouched.
+PREF_SHARE = float(os.environ.get("ESPGPT_PREF_SHARE", "0"))
+_pref_pair = None
+_pref_pair_pos = os.environ.get("ESPGPT_PREF_PAIR_POS", "")
+_pref_pair_neg = os.environ.get("ESPGPT_PREF_PAIR_NEG", "")
+if PREF_SHARE > 0.0:
+    if not (_pref_pair_pos and _pref_pair_neg):
+        raise SystemExit(
+            "ESPGPT_PREF_SHARE needs ESPGPT_PREF_PAIR_POS and ESPGPT_PREF_PAIR_NEG")
+
+    def _load_pair(path):
+        with open(path, "r", encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
+        if not lines:
+            raise SystemExit(f"{path}: no windows")
+        lens = np.array([len(x.split()) for x in lines], dtype=np.int32)
+        mat = np.zeros((len(lines), int(lens.max())), dtype=np.int16)
+        for i, ln in enumerate(lines):
+            mat[i, :lens[i]] = np.array(ln.split(), dtype=np.int16)
+        masks = None
+        mp = path + ".mask"
+        if os.path.isfile(mp):
+            masks = np.array(open(mp).read().split(), dtype=np.int8)
+            if masks.size != len(lines):
+                raise SystemExit(f"{mp}: {masks.size} masks vs {len(lines)} windows")
+        return mat, lens, masks
+
+    _pp, _ppl, _ppm = _load_pair(_pref_pair_pos)
+    _pn, _pnl, _pnm = _load_pair(_pref_pair_neg)
+    if len(_ppl) != len(_pnl):
+        raise SystemExit("preference pair corpora differ in length")
+    _pref_pair = {"n": len(_ppl), "pos": _pp, "pos_len": _ppl, "pos_mask": _ppm,
+                  "neg": _pn, "neg_len": _pnl, "neg_mask": _pnm}
+    print(f"preference pair pool: {_pref_pair['n']:,} pairs, "
+          f"{PREF_SHARE:.0%} of training steps, "
+          f"weight {os.environ.get('ESPGPT_PREFERENCE_WEIGHT', '0')} "
+          f"margin {os.environ.get('ESPGPT_PREFERENCE_MARGIN', '0.5')}")
+
+
 def get_batch(split, with_meta=False):
+    # A preference step replaces the whole batch: `x/y` are the preferred
+    # answers, `pref_x/pref_y` the counterfactuals they are compared against.
+    # Gated on with_meta so estimate_loss() keeps measuring the SFT corpus.
+    if (with_meta and split == "train" and _pref_pair is not None
+            and random.random() < PREF_SHARE):
+        if os.environ.get("ESPGPT_PREF_TRACE"):
+            print(f"  [pref step] drawing {batch_size} of {_pref_pair['n']} pairs", flush=True)
+        xb, yb, negs, neg_ys = [], [], [], []
+        for _ in range(batch_size):
+            j = random.randrange(_pref_pair["n"])
+            pm = int(_pref_pair["pos_mask"][j]) if _pref_pair["pos_mask"] is not None else 0
+            x, y = _pad_window(_pref_pair["pos"][j, :int(_pref_pair["pos_len"][j])], pm)
+            xb.append(x)
+            yb.append(y)
+            nm = int(_pref_pair["neg_mask"][j]) if _pref_pair["neg_mask"] is not None else 0
+            nx, ny = _pad_window(_pref_pair["neg"][j, :int(_pref_pair["neg_len"][j])], nm)
+            negs.append(nx)
+            neg_ys.append(ny)
+        return (torch.stack(xb).to(device), torch.stack(yb).to(device),
+                torch.full((batch_size,), -1, device=device, dtype=torch.long),
+                torch.stack(negs).to(device), torch.stack(neg_ys).to(device))
     if split == "train" and _sample_pools is not None:
         idxs = [_sample_train_idx() for _ in range(batch_size)]
     else:

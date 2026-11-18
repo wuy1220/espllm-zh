@@ -2090,3 +2090,52 @@ unseen `4/26`、多轮 `3/26`、OOD `6/14`，而正式模型是 `20/26`、`26/26
 后续任何 A/B 的前置条件改为：先用 `run_acceptance.py` 验证控制组 ≥ 20/26、OOD ≥ 12/14，
 再读实验组数字；控制组不达标时该轮结果作废，不写结论。
 
+
+## 20.44 同主题反事实 preference A/B 重做：控制组有效，路由四项小幅领先，盲评被计费挡住（2026-11-18）
+
+20.43 判定 20.38 的控制组无效，这里用能复现正式模型路由的池子重做同一信号。
+
+**配方**（与 20.29/20.36 的有效控制组逐项对齐）：主集 `dataset_stance26.txt`（4,841 窗口，
+4,356 训练 / 485 验证）+ `dataset_failure_multiturn_stance26.txt` 12% 窗口采样；从
+`model/_stance_mt12.pt.best` warm start，400 步、lr `5e-5`、warmup 20、cosine 到 `1e-5`、
+batch 128、8 线程、5L/32E/1850。控制组只走这条池子；实验组再让 **8% 的训练步**整批取自
+`build_detail_preference.py` 的 512 对同主题反事实（正向答案做 SFT，反事实做 preference 负例，
+`ESPGPT_PREFERENCE_WEIGHT=0.01`、`MARGIN=0.5`）。
+
+**工程**：`main.py` 新增 `ESPGPT_PREF_SHARE` / `ESPGPT_PREF_PAIR_POS` / `ESPGPT_PREF_PAIR_NEG`
+（+67 行，默认全关；原有 1:1 对齐的 `ESPGPT_PREF_DATASET` 只能把 pair 集铺满整个主集，512 对混不进
+4.8k 窗口）。`run_pref_ab.py` 把训练 → 闸门 → 留出预测 → 裁判串成一条命令；`--reuse-control`
+跳过已有控制组。
+
+**闸门按实测修订**。20.43 写的 "OOD ≥ 12/14" 这条配方做不到：两次独立控制组的权重文件字节不同
+（`82f2d0aa…` / `8c1824b5…`），行为却逐位相同，都是 unseen `20/26`、OOD `10/14`、KL `7.372`，
+同时 203 集 `201/203`、日常三概念 `66/66`。也就是说 12/14 属于 10-23 那份构建，用 14 条探针卡
+会让一个在 203 集上超过正式模型的控制组作废。闸门改为 **unseen ≥ 20/26 且 203 ≥ 195/203**，
+OOD 只报告；塌陷组（`4/26`、`6/14`）仍然会被拦住。
+
+| checkpoint | unseen | OOD | KL | 203 集 | 日常三概念 |
+|---|---:|---:|---:|---:|---:|
+| `control.pt.best`（val 最优，step 300） | 20/26 | 10/14 | 7.372 | 201/203 | 66/66 |
+| `pref.pt.best`（= warm start，见下） | 20/26 | 12/14 | 3.535 | 198/203 | 64/66 |
+| `control.pt`（400 步终态） | 20/26 | 11/14 | 6.158 | 199/203 | 65/66 |
+| `pref.pt`（400 步终态） | **21/26** | **13/14** | 4.827 | **202/203** | **66/66** |
+
+**一个必须记住的口径陷阱**：`pref.pt.best` 的权重指纹与 `model/_stance_mt12.pt.best` 完全相同
+（`0ce1aa18e74a4862…`）。实验组验证 loss 从 iter 0 的 `1.3127` 一路升到 `1.3170`，一次都没刷新，
+于是 `.best` 存的就是 warm start。如果照 20.36 的做法用 `.best` 对比，会得到"实验组等于起点、
+与对照组的两项差距全算在训练头上"的假结论。**带辅助损失的一轮必须用同为 400 步的终态比较**，
+`.best` 只说明"这轮没有一步在 SFT 目标上赢过起点"。
+
+验证 loss 与行为再次反向：终态 control `1.3095` 优于 pref `1.3170`，而四项行为指标全部是 pref 略高。
+差值只有 1~3 条（26/14/203 的固定贪心探针），统计上很弱，不能据此宣布收益，只能说明
+20.38 的"否决"至少没有被这次重做证实。
+
+**盲评没跑成**：七牛云侧 `Account is suspended due to billing status`，91 个模型（含 `-free` 档）
+一律 403；原裁判 `moonshotai/kimi-k3-free` 另已于 2026-10-27 退役。64 条留出题的预测已生成
+（`pref_ab_predictions_final.jsonl`，两组均 64/64 非空、control 33 种 / pref 29 种不同回复），
+额度恢复后一条 `judge_alignment_holdout.py` 即可补评。抽查 6 条，两组都还在复用通用回复
+（"越冷咱冻得越结实"），肉眼分不出高下，这也是不能只看探针数字的原因。
+
+产物在 `E:\espllm_data\persona_corpus\pref_ab_20261118\`：`control.pt(.best)`、`pref.pt(.best)`、
+`control2.pt`（复现性验证）、`probe_*.log`、`per_concept_*.log`、`pref_ab_predictions_final.jsonl`。
+
